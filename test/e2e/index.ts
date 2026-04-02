@@ -464,74 +464,91 @@ async function main(): Promise<void> {
     );
   }
 
-  // ── 7. Build transaction ──────────────────────────────────────────────────
-  logStep(7, 'Build transfer transaction');
-  const recipient = Keypair.generate();
   const transferAmount = await connection.getMinimumBalanceForRentExemption(0);
-  log(`  From:      ${address.toBase58()}`);
-  log(`  To:        ${recipient.publicKey.toBase58()} (throwaway)`);
-  log(`  Amount:    ${transferAmount} lamports (rent-exempt minimum)`);
+  const signTimings: number[] = [];
 
-  const { blockhash, lastValidBlockHeight } =
-    await connection.getLatestBlockhash();
+  for (let txNum = 1; txNum <= 2; txNum++) {
+    // ── 7/11. Build transaction ─────────────────────────────────────────────
+    logStep(txNum === 1 ? 7 : 11, `Build transfer transaction (tx ${txNum}/2)`);
+    const recipient = Keypair.generate();
+    log(`  From:      ${address.toBase58()}`);
+    log(`  To:        ${recipient.publicKey.toBase58()} (throwaway)`);
+    log(`  Amount:    ${transferAmount} lamports (rent-exempt minimum)`);
 
-  const tx = new Transaction().add(
-    SystemProgram.transfer({
-      fromPubkey: address,
-      toPubkey: recipient.publicKey,
-      lamports: transferAmount,
-    })
-  );
-  tx.recentBlockhash = blockhash;
-  tx.feePayer = address;
+    const { blockhash, lastValidBlockHeight } =
+      await connection.getLatestBlockhash();
 
-  const msgBytes = tx.serializeMessage();
-  log(`  Message:   ${msgBytes.length} bytes`);
-
-  // ── 8. Sign on card ───────────────────────────────────────────────────────
-  logStep(8, 'Sign on card');
-  log('  Signing (key setup ~2.7s + EC sign ~1.4s)...');
-  const t1 = Date.now();
-  const sigBytes = await signTx(card, SOLANA_PATH, msgBytes);
-  const elapsed = ((Date.now() - t1) / 1000).toFixed(1);
-  log(`  Done in ${elapsed}s`);
-  log(`  Signature: ${sigBytes.toString('hex').slice(0, 32)}...`);
-
-  // ── 9. Attach signature, verify, broadcast ────────────────────────────────
-  logStep(9, 'Broadcast transaction');
-  tx.addSignature(address, sigBytes);
-
-  if (!tx.verifySignatures()) {
-    throw new Error(
-      'Signature verification failed — card returned an invalid signature'
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: address,
+        toPubkey: recipient.publicKey,
+        lamports: transferAmount,
+      })
     );
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = address;
+
+    const msgBytes = tx.serializeMessage();
+    log(`  Message:   ${msgBytes.length} bytes`);
+
+    // ── 8/12. Sign on card ──────────────────────────────────────────────────
+    logStep(txNum === 1 ? 8 : 12, `Sign on card (tx ${txNum}/2)`);
+    log(
+      txNum === 1
+        ? '  Signing tx 1 — expect key setup + sign (~4s if re-derivation, ~1.4s if cached)...'
+        : '  Signing tx 2 — timing reveals whether re-derivation occurs on every sign...'
+    );
+    const tSign = Date.now();
+    const sigBytes = await signTx(card, SOLANA_PATH, msgBytes);
+    const elapsed = (Date.now() - tSign) / 1000;
+    signTimings.push(elapsed);
+    log(`  Done in ${elapsed.toFixed(3)}s`);
+    log(`  Signature: ${sigBytes.toString('hex').slice(0, 32)}...`);
+
+    // ── 9/13. Attach signature, verify, broadcast ───────────────────────────
+    logStep(txNum === 1 ? 9 : 13, `Broadcast transaction (tx ${txNum}/2)`);
+    tx.addSignature(address, sigBytes);
+
+    if (!tx.verifySignatures()) {
+      throw new Error(
+        `Signature verification failed for tx ${txNum} — card returned an invalid signature`
+      );
+    }
+    log('  Signature verified locally ✓');
+
+    const rawTx = tx.serialize();
+    const txSig = await connection.sendRawTransaction(rawTx, {
+      skipPreflight: false,
+    });
+    log(`  Sent: ${txSig}`);
+
+    // ── 10/14. Confirm ──────────────────────────────────────────────────────
+    logStep(txNum === 1 ? 10 : 14, `Confirm (tx ${txNum}/2)`);
+    log('  Waiting for confirmation...');
+    await connection.confirmTransaction(
+      { signature: txSig, blockhash, lastValidBlockHeight },
+      'confirmed'
+    );
+
+    const balance = await connection.getBalance(address);
+    console.log(`
+  ✓ Tx ${txNum} confirmed!
+  TxID:     ${txSig}
+  Balance:  ${(balance / LAMPORTS_PER_SOL).toFixed(6)} SOL
+  Explorer: https://explorer.solana.com/tx/${txSig}?cluster=devnet`);
   }
-  log('  Signature verified locally ✓');
 
-  const rawTx = tx.serialize();
-  const txSig = await connection.sendRawTransaction(rawTx, {
-    skipPreflight: false,
-  });
-  log(`  Sent: ${txSig}`);
-
-  // ── 10. Confirm ───────────────────────────────────────────────────────────
-  logStep(10, 'Confirm');
-  log('  Waiting for confirmation...');
-  await connection.confirmTransaction(
-    { signature: txSig, blockhash, lastValidBlockHeight },
-    'confirmed'
-  );
-
-  const finalBalance = await connection.getBalance(address);
-
+  // ── 15. Timing summary ────────────────────────────────────────────────────
+  logStep(15, 'Sign timing summary');
+  const [t1, t2] = signTimings;
+  const delta = t2 - t1;
   console.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║  ✓ Transaction confirmed!                                    ║
+║  Sign timing results                                         ║
 ╚══════════════════════════════════════════════════════════════╝
-  Address:  ${address.toBase58()}
-  Balance:  ${(finalBalance / LAMPORTS_PER_SOL).toFixed(6)} SOL
-  TxID:     ${txSig}
-  Explorer: https://explorer.solana.com/tx/${txSig}?cluster=devnet
+  Tx 1 sign time: ${t1.toFixed(3)}s
+  Tx 2 sign time: ${t2.toFixed(3)}s
+  Delta (tx2-tx1): ${delta >= 0 ? '+' : ''}${delta.toFixed(3)}s  
 `);
 
   card.reader.disconnect(card.reader.SCARD_LEAVE_CARD, () => {

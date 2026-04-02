@@ -45,6 +45,7 @@ public class Ed25519Signer {
     private BigNat           eight;
     private ECPoint          point;
     private MessageDigest    hasher;
+    private RandomData       rng;
 
     // 32-byte public key stored in EEPROM
     private byte[]           publicKey;
@@ -98,6 +99,7 @@ public class Ed25519Signer {
         prefix      = new byte[32];
         publicNonce = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_DESELECT);
         ramArray    = JCSystem.makeTransientByteArray((short) Wei25519.G.length, JCSystem.CLEAR_ON_DESELECT);
+        rng         = RandomData.getInstance(RandomData.ALG_SECURE_RANDOM);
     }
 
     // ── setKey ────────────────────────────────────────────────────────────────
@@ -175,7 +177,6 @@ public class Ed25519Signer {
         if (!keyLoaded) ISOException.throwIt(TapiocaApplet.SW_SEED_NOT_IMPORTED);
 
         // ── Generate random nonce r ────────────────────────────────────────
-        RandomData rng = RandomData.getInstance(RandomData.ALG_SECURE_RANDOM);
         rng.generateData(ramArray, (short) 0, (short) 32);
         privateNonce.fromByteArray(ramArray, (short) 0, (short) 32);
         privateNonce.mod(curve.rBN);

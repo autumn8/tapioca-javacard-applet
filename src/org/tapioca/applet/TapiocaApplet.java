@@ -140,6 +140,7 @@ public class TapiocaApplet extends Applet {
         tmp = JCSystem.makeTransientByteArray((short) 300, JCSystem.CLEAR_ON_DESELECT);
         HmacSha512.init(tmp);
         HmacSha160.init(tmp);
+        lastDerivedPath = new byte[40]; // 10 levels × 4 bytes
         signer = new Ed25519Signer();
         // signer.init() is deferred to importSeed() to keep this install transaction small
         txState      = new SolanaTransaction();
@@ -430,6 +431,7 @@ public class TapiocaApplet extends Applet {
         Util.arrayFillNonAtomic(masterKey,       (short) 0, (short) 32,          (byte) 0x00);
         Util.arrayFillNonAtomic(masterChainCode, (short) 0, (short) 32,          (byte) 0x00);
         Util.arrayFillNonAtomic(cardLabel,       (short) 0, LABEL_MAX_SIZE,      (byte) 0x00);
+        lastDerivedDepth = (byte) -1;
         labelLen = (byte) 0;
         txState.reset();
         txSignActive[0] = (byte) 0x00;
@@ -495,6 +497,7 @@ public class TapiocaApplet extends Applet {
 
         Util.arrayFillNonAtomic(masterKey,       (short) 0, (short) 32, (byte) 0x00);
         Util.arrayFillNonAtomic(masterChainCode, (short) 0, (short) 32, (byte) 0x00);
+        lastDerivedDepth = (byte) -1;
         isSeeded = false;
     }
 
@@ -539,6 +542,16 @@ public class TapiocaApplet extends Applet {
     //   [256..292] child data assembly scratch (0x00 || key[32] || index[4] = 37 bytes)
     //
     private void deriveAndLoadKey(byte depth, byte[] pathBuf, short pathOff) {
+        short pathLen    = (short)(depth * 4);
+        short pathOff0   = pathOff; // save original offset for cache write
+
+        // Skip derivation if the same path was used last time (~2,700 ms saved).
+        if (lastDerivedDepth == depth && depth >= (byte) 0 &&
+                Util.arrayCompare(pathBuf, pathOff0,
+                                  lastDerivedPath, (short) 0, pathLen) == (byte) 0) {
+            return;
+        }
+
         // Seed the working buffers with master key material
         Util.arrayCopyNonAtomic(masterKey,       (short) 0, tmp, (short) 192, (short) 32);
         Util.arrayCopyNonAtomic(masterChainCode, (short) 0, tmp, (short) 224, (short) 32);
@@ -557,7 +570,18 @@ public class TapiocaApplet extends Applet {
         // tmp[192..223] = final derived IL (Ed25519 seed)
         // Load into signer — this performs RFC 8032 expansion + EC keygen (~2700 ms)
         signer.setKey(tmp, (short) 192);
+
+        // Cache this path so the next call with the same path skips derivation
+        lastDerivedDepth = depth;
+        Util.arrayCopyNonAtomic(pathBuf, pathOff0, lastDerivedPath, (short) 0, pathLen);
     }
+
+    // ── Key derivation path cache ─────────────────────────────────────────────
+    // Caches the last derived path so signer.setKey() (~2,700 ms) can be skipped
+    // when the same path is requested again (e.g. repeated signs on m/44'/501'/0').
+    // Max path: 10 levels × 4 bytes = 40 bytes.
+    private byte[] lastDerivedPath;        // 40 bytes EEPROM
+    private byte   lastDerivedDepth = (byte) -1; // -1 = cache invalid
 
     // Default Solana BIP-44 path: m/44'/501'/0'
     // All indexes hardened: 0x8000002C, 0x800001F5, 0x80000000

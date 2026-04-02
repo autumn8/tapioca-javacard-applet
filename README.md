@@ -28,8 +28,8 @@ Target hardware: **J3R180** (JCOP 4, ~180 KB EEPROM). Production target: **J3R45
 | RAM (transient) | ~8 KB                                    | ~16 KB                       |
 | Interface       | ISO 7816 + ISO 14443-4 (NFC)             | ISO 7816 + ISO 14443-4 (NFC) |
 | Ed25519         | Software (JCMathLib) — confirmed working | Native NXP — pending SDK     |
-| Keygen time     | ~2,700 ms                                | < 1 s (estimated)            |
-| Sign time       | ~1,440 ms                                | < 1 s (estimated)            |
+| Key derivation  | ~2,700 ms (first or new path)            | < 1 s (estimated)            |
+| Sign time       | ~1,440 ms (cached path) / ~4,200 ms (new path) | < 1 s (estimated)      |
 
 ---
 

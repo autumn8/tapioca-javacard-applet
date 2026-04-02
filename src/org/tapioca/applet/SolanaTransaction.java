@@ -19,6 +19,7 @@
 package org.tapioca.applet;
 
 import javacard.framework.ISOException;
+import javacard.framework.JCSystem;
 import javacard.framework.Util;
 
 public class SolanaTransaction {
@@ -26,17 +27,20 @@ public class SolanaTransaction {
     static final short MAX_MSG_SIZE = (short) 1200;
 
     // EEPROM buffer — persists across deselect, cleared explicitly by reset().
-    private byte[] msgBuf;
-    private short  msgLen;
+    private byte[]  msgBuf;
+    // Transient length counter — fast RAM writes on every update(); resets to 0
+    // on deselect, which is safe because txSignActive (in TapiocaApplet) also
+    // clears on deselect and ensures init() is always called before update().
+    private short[] msgLen; // [0] = length, CLEAR_ON_DESELECT
 
     public SolanaTransaction() {
         msgBuf = new byte[MAX_MSG_SIZE];
-        msgLen = 0;
+        msgLen = JCSystem.makeTransientShortArray((short) 1, JCSystem.CLEAR_ON_DESELECT);
     }
 
     /** Reset state and prepare to receive a new message. */
     public void init() {
-        msgLen = 0;
+        msgLen[0] = 0;
     }
 
     /**
@@ -45,10 +49,10 @@ public class SolanaTransaction {
      */
     public void update(byte[] src, short srcOff, short len) {
         if (len <= (short) 0) return;
-        if ((short)(msgLen + len) > MAX_MSG_SIZE)
+        if ((short)(msgLen[0] + len) > MAX_MSG_SIZE)
             ISOException.throwIt(TapiocaApplet.SW_INVALID_PARAMETER);
-        Util.arrayCopyNonAtomic(src, srcOff, msgBuf, msgLen, len);
-        msgLen += len;
+        Util.arrayCopyNonAtomic(src, srcOff, msgBuf, msgLen[0], len);
+        msgLen[0] += len;
     }
 
     /** Return the backing buffer. Valid bytes are msgBuf[0..getMessageLength()-1]. */
@@ -58,14 +62,14 @@ public class SolanaTransaction {
 
     /** Total bytes accumulated since last init(). */
     public short getMessageLength() {
-        return msgLen;
+        return msgLen[0];
     }
 
     /** Zero-fill the accumulated bytes and reset length counter. */
     public void reset() {
-        if (msgLen > (short) 0) {
-            Util.arrayFillNonAtomic(msgBuf, (short) 0, msgLen, (byte) 0x00);
+        if (msgLen[0] > (short) 0) {
+            Util.arrayFillNonAtomic(msgBuf, (short) 0, msgLen[0], (byte) 0x00);
         }
-        msgLen = 0;
+        msgLen[0] = 0;
     }
 }
