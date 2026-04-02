@@ -28,18 +28,31 @@ public class SolanaTransaction {
 
     // EEPROM buffer — persists across deselect, cleared explicitly by reset().
     private byte[]  msgBuf;
+    // EEPROM high-water mark — tracks the furthest byte ever written since the
+    // last reset(). Persists across deselect so init() can zero exactly the
+    // stale bytes left by a dropped NFC session, not the full 1200-byte buffer.
+    private short[] msgHigh; // [0] = high-water mark, EEPROM
     // Transient length counter — fast RAM writes on every update(); resets to 0
     // on deselect, which is safe because txSignActive (in TapiocaApplet) also
     // clears on deselect and ensures init() is always called before update().
     private short[] msgLen; // [0] = length, CLEAR_ON_DESELECT
 
     public SolanaTransaction() {
-        msgBuf = new byte[MAX_MSG_SIZE];
-        msgLen = JCSystem.makeTransientShortArray((short) 1, JCSystem.CLEAR_ON_DESELECT);
+        msgBuf  = new byte[MAX_MSG_SIZE];
+        msgHigh = new short[1]; // EEPROM, initialises to 0
+        msgLen  = JCSystem.makeTransientShortArray((short) 1, JCSystem.CLEAR_ON_DESELECT);
     }
 
     /** Reset state and prepare to receive a new message. */
     public void init() {
+        // Zero only the bytes that were written in the previous session.
+        // On a clean session msgHigh[0]==0, so nothing is zeroed.
+        // On a dropped-session restart msgHigh[0] holds the stale length,
+        // so exactly those bytes are cleared — not the full 1200-byte buffer.
+        if (msgHigh[0] > (short) 0) {
+            Util.arrayFillNonAtomic(msgBuf, (short) 0, msgHigh[0], (byte) 0x00);
+            msgHigh[0] = (short) 0;
+        }
         msgLen[0] = 0;
     }
 
@@ -53,6 +66,9 @@ public class SolanaTransaction {
             ISOException.throwIt(TapiocaApplet.SW_INVALID_PARAMETER);
         Util.arrayCopyNonAtomic(src, srcOff, msgBuf, msgLen[0], len);
         msgLen[0] += len;
+        // Advance EEPROM high-water mark so init() knows how much to zero on
+        // a dropped-session restart.
+        if (msgLen[0] > msgHigh[0]) msgHigh[0] = msgLen[0];
     }
 
     /** Return the backing buffer. Valid bytes are msgBuf[0..getMessageLength()-1]. */
@@ -71,5 +87,6 @@ public class SolanaTransaction {
             Util.arrayFillNonAtomic(msgBuf, (short) 0, msgLen[0], (byte) 0x00);
         }
         msgLen[0] = 0;
+        msgHigh[0] = (short) 0;
     }
 }

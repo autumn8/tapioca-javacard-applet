@@ -115,6 +115,11 @@ public class TapiocaApplet extends Applet {
     // ── Secure channel (Phase 3) ──────────────────────────────────────────────
     private SecureChannel sc;
 
+    // ── Secure-channel dispatch flag (CLEAR_ON_DESELECT) ─────────────────────
+    // Set to 1 while dispatching a command from within the SC envelope.
+    // Sensitive handlers check this to ensure commands are never processed in plaintext.
+    private byte[] inSecureChannel; // 1 byte, CLEAR_ON_DESELECT
+
     // ── Transient scratch (cleared on deselect) ───────────────────────────────
     // Layout (300 bytes total):
     //   [0..191]   HmacSha512 internal scratch (BLOCKSIZE=128 + HASHSIZE=64)
@@ -143,8 +148,9 @@ public class TapiocaApplet extends Applet {
         lastDerivedPath = new byte[40]; // 10 levels × 4 bytes
         signer = new Ed25519Signer();
         // signer.init() is deferred to importSeed() to keep this install transaction small
-        txState      = new SolanaTransaction();
-        txSignActive = JCSystem.makeTransientByteArray((short) 1, JCSystem.CLEAR_ON_DESELECT);
+        txState         = new SolanaTransaction();
+        txSignActive    = JCSystem.makeTransientByteArray((short) 1, JCSystem.CLEAR_ON_DESELECT);
+        inSecureChannel = JCSystem.makeTransientByteArray((short) 1, JCSystem.CLEAR_ON_DESELECT);
         sc = new SecureChannel();
         // generateAuthentikeyIfNeeded() runs an ECDH scalar multiplication which
         // exceeds the card's install transaction buffer. Deferred to select() instead.
@@ -177,19 +183,26 @@ public class TapiocaApplet extends Applet {
 
         byte[] buf = apdu.getBuffer();
 
+        // Reset SC-dispatch flag at the top of every command to prevent stale state
+        // from a previous exception-aborted SC dispatch.
+        inSecureChannel[0] = (byte) 0;
+
         if (buf[ISO7816.OFFSET_CLA] != CLA_SOLANA)
             ISOException.throwIt(ISO7816.SW_CLA_NOT_SUPPORTED);
 
         byte ins = buf[ISO7816.OFFSET_INS];
 
         // ── Commands always permitted without setup or secure channel ─────────
-        if (ins == INS_GET_STATUS) { getStatus(apdu); return; }
+        if (ins == INS_GET_STATUS) {
+            apdu.setOutgoingAndSend((short) 0, getStatus(buf));
+            return;
+        }
 
         // ── Secure channel handshake — permitted before setup ─────────────────
         if (ins == INS_INIT_SECURE_CHANNEL) {
             apdu.setIncomingAndReceive();
-            short sizeout = sc.initSecureChannel(buf, ISO7816.OFFSET_CDATA, tmp);
-            apdu.setOutgoingAndSend((short) 0, sizeout);
+            short n = sc.initSecureChannel(buf, ISO7816.OFFSET_CDATA, tmp);
+            apdu.setOutgoingAndSend((short) 0, n);
             return;
         }
 
@@ -197,7 +210,7 @@ public class TapiocaApplet extends Applet {
         if (ins == INS_PROCESS_SECURE_CHANNEL) {
             apdu.setIncomingAndReceive();
             short bytesLeft = Util.makeShort((byte) 0x00, buf[ISO7816.OFFSET_LC]);
-            // Decrypt in-place; returns number of plaintext bytes at buf[0]
+            // Decrypt in-place; decrypted command lands at buf[0..]
             try {
                 sc.processSecureChannel(buf, ISO7816.OFFSET_CDATA, bytesLeft, tmp);
             } catch (javacard.security.CryptoException e) {
@@ -211,76 +224,105 @@ public class TapiocaApplet extends Applet {
             } catch (Exception e) {
                 ISOException.throwIt((short) 0x9C6F);
             }
-            // Re-dispatch on decrypted INS (now at buf[ISO7816.OFFSET_INS])
+
             ins = buf[ISO7816.OFFSET_INS];
+            // Allow INS_SETUP before setupDone; all others need setup first.
+            if (ins != INS_SETUP && !setupDone)
+                ISOException.throwIt(SW_SETUP_NOT_DONE);
+
+            // Mark that we are executing inside the SC envelope.
+            inSecureChannel[0] = (byte) 1;
+            short sizeout = (short) 0;
             try {
-                dispatchDecrypted(apdu, buf, ins);
+                sizeout = dispatchDecrypted(buf, ins);
             } catch (javacard.security.CryptoException e) {
+                inSecureChannel[0] = (byte) 0;
                 ISOException.throwIt(Util.makeShort((byte) 0x9C, (byte)(0x70 + (byte)e.getReason())));
             } catch (ArrayIndexOutOfBoundsException e) {
+                inSecureChannel[0] = (byte) 0;
                 ISOException.throwIt((short) 0x9C80);
             } catch (NullPointerException e) {
+                inSecureChannel[0] = (byte) 0;
                 ISOException.throwIt((short) 0x9C81);
             } catch (ISOException e) {
+                inSecureChannel[0] = (byte) 0;
                 throw e;
             } catch (Exception e) {
+                inSecureChannel[0] = (byte) 0;
                 ISOException.throwIt((short) 0x9C8F);
+            }
+            inSecureChannel[0] = (byte) 0;
+
+            // Encrypt and MAC the response (if any) before sending.
+            if (sizeout > (short) 0) {
+                sizeout = sc.encryptResponse(buf, sizeout, tmp);
+                apdu.setOutgoingAndSend((short) 0, sizeout);
             }
             return;
         }
 
-        // ── Setup permitted without secure channel (bootstrapping) ────────────
-        if (ins == INS_SETUP) { setup(apdu); return; }
+        // ── Plaintext setup bootstrap ─────────────────────────────────────────
+        // INS_SETUP must be wrapped in the SC envelope; reject the plaintext path.
+        if (ins == INS_SETUP) {
+            // setup() will throw SW_SECURE_CHANNEL_REQUIRED because
+            // inSecureChannel[0] == 0 here.
+            apdu.setIncomingAndReceive();
+            setup(buf);
+            return;
+        }
 
         // All other commands require setup to have been completed
         if (!setupDone) ISOException.throwIt(SW_SETUP_NOT_DONE);
 
-        // Read incoming data once here so handlers don't need to call
-        // setIncomingAndReceive() — this avoids a double-call when the
-        // same handlers are dispatched from the secure channel path.
+        // Read incoming data so handlers can access OFFSET_CDATA.
         apdu.setIncomingAndReceive();
-        dispatchDecrypted(apdu, buf, ins);
+        short sizeout = dispatchDecrypted(buf, ins);
+        if (sizeout > (short) 0) apdu.setOutgoingAndSend((short) 0, sizeout);
     }
 
     /**
-     * Dispatch an already-received (and possibly decrypted) command.
-     * buf[OFFSET_INS] = ins; data already in buf.
+     * Dispatch an already-received (and possibly SC-decrypted) command.
+     * Returns the number of response bytes written to buf[0..n-1], or 0 for no data.
+     * Does NOT call apdu.setOutgoingAndSend — the caller handles send.
      */
-    private void dispatchDecrypted(APDU apdu, byte[] buf, byte ins) {
+    private short dispatchDecrypted(byte[] buf, byte ins) {
         switch (ins) {
-            case INS_GET_STATUS:          getStatus(apdu);          break;
-            case INS_VERIFY_PIN:          verifyPIN(apdu);          break;
-            case INS_CHANGE_PIN:          changePIN(apdu);          break;
-            case INS_UNBLOCK_PIN:         unblockPIN(apdu);         break;
-            case INS_RESET_TO_FACTORY:    resetToFactory(apdu);     break;
-            case INS_CARD_LABEL:          cardLabel(apdu);          break;
+            case INS_SETUP:              return setup(buf);
+            case INS_GET_STATUS:         return getStatus(buf);
+            case INS_VERIFY_PIN:         return verifyPIN(buf);
+            case INS_CHANGE_PIN:         return changePIN(buf);
+            case INS_UNBLOCK_PIN:        return unblockPIN(buf);
+            case INS_RESET_TO_FACTORY:   return resetToFactory(buf);
+            case INS_CARD_LABEL:         return cardLabel(buf);
             // ── Phase 1.2 ──
-            case INS_IMPORT_SEED:         importSeed(apdu);         break;
-            case INS_RESET_SEED:          resetSeed(apdu);          break;
-            case INS_GET_PUBLIC_KEY:      getPublicKey(apdu);       break;
+            case INS_IMPORT_SEED:        return importSeed(buf);
+            case INS_RESET_SEED:         return resetSeed(buf);
+            case INS_GET_PUBLIC_KEY:     return getPublicKey(buf);
             // ── Phase 1.3 ──
-            case INS_SIGN_TX:             signTransaction(apdu);    break;
+            case INS_SIGN_TX:            return signTransaction(buf);
             // ── Phase 3 ──
-            case INS_EXPORT_AUTHENTIKEY:  exportAuthentikey(apdu);  break;
+            case INS_EXPORT_AUTHENTIKEY: return exportAuthentikey(buf);
             default:
                 ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
+                return (short) 0; // unreachable
         }
     }
 
     // ── INS_SETUP (0x2A) ─────────────────────────────────────────────────────
     //
+    // REQUIRES: active secure channel (inSecureChannel == 1) so PIN and PUK
+    // are never transmitted in plaintext over NFC.
+    //
     // Data: [pin_len (1)] [pin (4-16 bytes)]
     //       [puk_len (1)] [puk (4-16 bytes)]
     //
     // Can only be called once. Subsequent calls return SW_SETUP_ALREADY_DONE.
-    // PIN and PUK must be different lengths or values — no validation enforced here;
-    // left to the host application.
     //
-    private void setup(APDU apdu) {
+    private short setup(byte[] buf) {
         if (setupDone) ISOException.throwIt(SW_SETUP_ALREADY_DONE);
+        // Enforce SC so PIN+PUK are never transmitted in plaintext over NFC.
+        if (inSecureChannel[0] != (byte) 1) ISOException.throwIt(SW_SECURE_CHANNEL_REQUIRED);
 
-        apdu.setIncomingAndReceive();
-        byte[] buf = apdu.getBuffer();
         short off = ISO7816.OFFSET_CDATA;
 
         // Parse PIN
@@ -300,6 +342,7 @@ public class TapiocaApplet extends Applet {
         pin.update(buf, pinOff, pinLen);
         puk.update(buf, pukOff, pukLen);
         setupDone = true;
+        return (short) 0;
     }
 
     // ── INS_GET_STATUS (0x3C) ─────────────────────────────────────────────────
@@ -312,8 +355,7 @@ public class TapiocaApplet extends Applet {
     //   [puk_tries_left (1)] [puk_tries_max (1)]
     //   [is_seeded (1)] [secure_channel (1)] [setup_done (1)] [reserved (1)]
     //
-    private void getStatus(APDU apdu) {
-        byte[] buf = apdu.getBuffer();
+    private short getStatus(byte[] buf) {
         short pos = (short) 0;
 
         buf[pos++] = PROTOCOL_MAJOR;
@@ -338,10 +380,12 @@ public class TapiocaApplet extends Applet {
         buf[pos++] = setupDone ? (byte) 0x01 : (byte) 0x00;
         buf[pos++] = (byte) 0x00;  // reserved
 
-        apdu.setOutgoingAndSend((short) 0, pos);
+        return pos;
     }
 
     // ── INS_VERIFY_PIN (0x42) ─────────────────────────────────────────────────
+    //
+    // REQUIRES: active secure channel so PIN is never transmitted in plaintext.
     //
     // Data: PIN bytes (4-16)
     //
@@ -349,28 +393,32 @@ public class TapiocaApplet extends Applet {
     // SW on blocked: SW_IDENTITY_BLOCKED
     // Valid until card deselected (NFC session ends or power removed).
     //
-    private void verifyPIN(APDU apdu) {
-        byte[] buf = apdu.getBuffer();
+    private short verifyPIN(byte[] buf) {
+        if (inSecureChannel[0] != (byte) 1) ISOException.throwIt(SW_SECURE_CHANNEL_REQUIRED);
+
         byte len = buf[ISO7816.OFFSET_LC];
 
         if (pin.getTriesRemaining() == 0) ISOException.throwIt(SW_IDENTITY_BLOCKED);
 
         if (!pin.check(buf, ISO7816.OFFSET_CDATA, len))
             ISOException.throwIt((short)(SW_PIN_FAILED | pin.getTriesRemaining()));
+        return (short) 0;
     }
 
     // ── INS_CHANGE_PIN (0x44) ─────────────────────────────────────────────────
     //
-    // Requires PIN validated in current session.
+    // REQUIRES: active secure channel and PIN validated in current session.
     // Data: [old_len (1)] [old_pin] [new_len (1)] [new_pin]
     //
-    private void changePIN(APDU apdu) {
+    private short changePIN(byte[] buf) {
+        if (inSecureChannel[0] != (byte) 1) ISOException.throwIt(SW_SECURE_CHANNEL_REQUIRED);
         if (!pin.isValidated()) ISOException.throwIt(SW_UNAUTHORIZED);
 
-        byte[] buf = apdu.getBuffer();
         short off = ISO7816.OFFSET_CDATA;
 
         byte oldLen = buf[off++];
+        if (oldLen < PIN_MIN_SIZE || oldLen > PIN_MAX_SIZE)
+            ISOException.throwIt(SW_INVALID_PARAMETER);
         short oldOff = off;
         off += oldLen;
 
@@ -384,20 +432,25 @@ public class TapiocaApplet extends Applet {
             ISOException.throwIt((short)(SW_PIN_FAILED | pin.getTriesRemaining()));
 
         pin.update(buf, newOff, newLen);
+        return (short) 0;
     }
 
     // ── INS_UNBLOCK_PIN (0x46) ────────────────────────────────────────────────
     //
+    // REQUIRES: active secure channel.
     // Data: [puk_len (1)] [puk] [new_pin_len (1)] [new_pin]
     //
     // Resets the PIN to a new value after verifying the PUK.
     // Also resets the PIN retry counter.
     //
-    private void unblockPIN(APDU apdu) {
-        byte[] buf = apdu.getBuffer();
+    private short unblockPIN(byte[] buf) {
+        if (inSecureChannel[0] != (byte) 1) ISOException.throwIt(SW_SECURE_CHANNEL_REQUIRED);
+
         short off = ISO7816.OFFSET_CDATA;
 
         byte pukLen = buf[off++];
+        if (pukLen < PIN_MIN_SIZE || pukLen > PIN_MAX_SIZE)
+            ISOException.throwIt(SW_INVALID_PARAMETER);
         short pukOff = off;
         off += pukLen;
 
@@ -413,16 +466,18 @@ public class TapiocaApplet extends Applet {
 
         pin.resetAndUnblock();
         pin.update(buf, newOff, newLen);
+        return (short) 0;
     }
 
     // ── INS_RESET_TO_FACTORY (0xFF) ───────────────────────────────────────────
     //
-    // Requires PIN validated. Wipes all state — PIN, PUK, seed, keys.
+    // REQUIRES: active secure channel and PIN validated. Wipes all state — PIN, PUK, seed, keys.
     // Response SW: 0xFF00 (SW_RESET_TO_FACTORY).
     // The applet remains installed but returns to the uninitialized state;
     // INS_SETUP must be called again before any other command.
     //
-    private void resetToFactory(APDU apdu) {
+    private short resetToFactory(byte[] buf) {
+        if (inSecureChannel[0] != (byte) 1) ISOException.throwIt(SW_SECURE_CHANNEL_REQUIRED);
         if (!pin.isValidated()) ISOException.throwIt(SW_UNAUTHORIZED);
 
         pin.resetAndUnblock();
@@ -431,36 +486,42 @@ public class TapiocaApplet extends Applet {
         Util.arrayFillNonAtomic(masterKey,       (short) 0, (short) 32,          (byte) 0x00);
         Util.arrayFillNonAtomic(masterChainCode, (short) 0, (short) 32,          (byte) 0x00);
         Util.arrayFillNonAtomic(cardLabel,       (short) 0, LABEL_MAX_SIZE,      (byte) 0x00);
+        Util.arrayFillNonAtomic(lastDerivedPath, (short) 0, (short) 40,          (byte) 0x00);
         lastDerivedDepth = (byte) -1;
         labelLen = (byte) 0;
         txState.reset();
         txSignActive[0] = (byte) 0x00;
         sc.reset();
 
+        // Zero signer EEPROM key material (tmp[0..31] was zeroed above).
+        if (signerInitialized) {
+            signer.clearKey(tmp, (short) 0);
+        }
+
         setupDone = false;
         isSeeded  = false;
 
         ISOException.throwIt(SW_RESET_TO_FACTORY);
+        return (short) 0; // unreachable
     }
 
     // ── INS_IMPORT_SEED (0x6C) ────────────────────────────────────────────────
     //
-    // Requires PIN validated. Replaces any existing seed.
-    //
+    // REQUIRES: active secure channel and PIN validated.
     // Data: [seed (64 bytes)] — BIP-39 derived seed (PBKDF2-HMAC-SHA512 output)
     //
     // Process:
     //   1. HMAC-SHA512("ed25519 seed", seed) → [IL(32) | IR(32)]
-    //   2. Store IL as masterKey, IR as masterChainCode
+    //   2. Atomically store IL as masterKey, IR as masterChainCode, isSeeded=true
     //   3. Derive key at m/44'/501'/0' and load into signer
     //   4. Return 32-byte public key at m/44'/501'/0'
     //
     // Note: key derivation (~2700 ms) happens in this call, not at sign time.
     //
-    private void importSeed(APDU apdu) {
+    private short importSeed(byte[] buf) {
+        if (inSecureChannel[0] != (byte) 1) ISOException.throwIt(SW_SECURE_CHANNEL_REQUIRED);
         if (!pin.isValidated()) ISOException.throwIt(SW_UNAUTHORIZED);
 
-        byte[] buf = apdu.getBuffer();
         byte len = buf[ISO7816.OFFSET_LC];
         if (len != (byte) 64) ISOException.throwIt(SW_INVALID_PARAMETER);
 
@@ -473,11 +534,13 @@ public class TapiocaApplet extends Applet {
         // tmp[192..255] = HMAC output: IL[32] | IR[32]
         Slip10.deriveMaster(buf, ISO7816.OFFSET_CDATA, tmp, (short) 192);
 
-        // Store master key material in EEPROM
-        Util.arrayCopyNonAtomic(tmp, (short) 192, masterKey,       (short) 0, (short) 32);
-        Util.arrayCopyNonAtomic(tmp, (short) 224, masterChainCode, (short) 0, (short) 32);
-
+        // Atomically commit master key material. Power loss between writes would
+        // leave masterKey/masterChainCode inconsistent without a transaction.
+        JCSystem.beginTransaction();
+        Util.arrayCopy(tmp, (short) 192, masterKey,       (short) 0, (short) 32);
+        Util.arrayCopy(tmp, (short) 224, masterChainCode, (short) 0, (short) 32);
         isSeeded = true;
+        JCSystem.commitTransaction();
 
         // Derive m/44'/501'/0' and load into signer
         // Path bytes (all hardened): 0x8000002C, 0x800001F5, 0x80000000
@@ -485,20 +548,28 @@ public class TapiocaApplet extends Applet {
 
         // Return 32-byte public key
         signer.getPublicKey(buf, (short) 0);
-        apdu.setOutgoingAndSend((short) 0, (short) 32);
+        return (short) 32;
     }
 
     // ── INS_RESET_SEED (0x77) ─────────────────────────────────────────────────
     //
     // Requires PIN validated. Wipes master key, chain code, and signer state.
     //
-    private void resetSeed(APDU apdu) {
+    private short resetSeed(byte[] buf) {
         if (!pin.isValidated()) ISOException.throwIt(SW_UNAUTHORIZED);
 
         Util.arrayFillNonAtomic(masterKey,       (short) 0, (short) 32, (byte) 0x00);
         Util.arrayFillNonAtomic(masterChainCode, (short) 0, (short) 32, (byte) 0x00);
+        Util.arrayFillNonAtomic(lastDerivedPath, (short) 0, (short) 40, (byte) 0x00);
         lastDerivedDepth = (byte) -1;
         isSeeded = false;
+
+        if (signerInitialized) {
+            // Ensure tmp[0..31] is zeroed before using as a zero-fill source for clearKey.
+            Util.arrayFillNonAtomic(tmp, (short) 0, (short) 32, (byte) 0x00);
+            signer.clearKey(tmp, (short) 0);
+        }
+        return (short) 0;
     }
 
     // ── INS_GET_PUBLIC_KEY (0x6D) ─────────────────────────────────────────────
@@ -512,20 +583,24 @@ public class TapiocaApplet extends Applet {
     //
     // Response: 32-byte Ed25519 public key
     //
-    private void getPublicKey(APDU apdu) {
+    private short getPublicKey(byte[] buf) {
         if (!pin.isValidated()) ISOException.throwIt(SW_UNAUTHORIZED);
         if (!isSeeded)          ISOException.throwIt(SW_SEED_NOT_IMPORTED);
 
-        byte[] buf = apdu.getBuffer();
         short off = ISO7816.OFFSET_CDATA;
         byte depth = buf[off++];
 
         if (depth < 0 || depth > (byte) 10) ISOException.throwIt(SW_INVALID_PARAMETER);
 
+        // Validate that the APDU contains enough bytes for the full path.
+        short pathLen   = (short)(depth * 4);
+        short available = (short)((buf[ISO7816.OFFSET_LC] & 0xFF) - 1); // -1 for depth byte
+        if (available < pathLen) ISOException.throwIt(SW_INVALID_PARAMETER);
+
         deriveAndLoadKey(depth, buf, off);
 
         signer.getPublicKey(buf, (short) 0);
-        apdu.setOutgoingAndSend((short) 0, (short) 32);
+        return (short) 32;
     }
 
     // ── Key derivation helper ─────────────────────────────────────────────────
@@ -593,7 +668,7 @@ public class TapiocaApplet extends Applet {
 
     // ── INS_SIGN_TX (0x6F) ───────────────────────────────────────────────────
     //
-    // Requires PIN validated and seed imported.
+    // REQUIRES: active secure channel, PIN validated, and seed imported.
     // Streams a Solana transaction message across one or more APDUs, derives the
     // signing key for the requested path, and returns a 64-byte Ed25519 signature.
     //
@@ -607,11 +682,11 @@ public class TapiocaApplet extends Applet {
     // Other chunk data: [message bytes ...]
     // Response (last chunk only): [signature (64 bytes)]
     //
-    private void signTransaction(APDU apdu) {
+    private short signTransaction(byte[] buf) {
+        if (inSecureChannel[0] != (byte) 1) ISOException.throwIt(SW_SECURE_CHANNEL_REQUIRED);
         if (!pin.isValidated()) ISOException.throwIt(SW_UNAUTHORIZED);
         if (!isSeeded)          ISOException.throwIt(SW_SEED_NOT_IMPORTED);
 
-        byte[] buf  = apdu.getBuffer();
         byte   p1   = buf[ISO7816.OFFSET_P1];
         short  len  = (short)(buf[ISO7816.OFFSET_LC] & 0xFF);
         short  off  = ISO7816.OFFSET_CDATA;
@@ -653,9 +728,10 @@ public class TapiocaApplet extends Applet {
                         buf, (short) 0);
             txState.reset();
             txSignActive[0] = (byte) 0x00;
-            apdu.setOutgoingAndSend((short) 0, (short) 64);
+            return (short) 64;
         }
         // Non-last chunks: fall through with SW 9000 and no response data
+        return (short) 0;
     }
 
     // ── INS_CARD_LABEL (0x3D) ─────────────────────────────────────────────────
@@ -665,8 +741,7 @@ public class TapiocaApplet extends Applet {
     //   label_len = 0 clears the label.
     //   Max label size: LABEL_MAX_SIZE (64) bytes.
     //
-    private void cardLabel(APDU apdu) {
-        byte[] buf = apdu.getBuffer();
+    private short cardLabel(byte[] buf) {
         byte p1 = buf[ISO7816.OFFSET_P1];
 
         if (p1 == (byte) 0x01) {
@@ -677,11 +752,12 @@ public class TapiocaApplet extends Applet {
             if (len < 0 || len > LABEL_MAX_SIZE) ISOException.throwIt(SW_INVALID_PARAMETER);
             Util.arrayCopyNonAtomic(buf, off, cardLabel, (short) 0, len);
             labelLen = len;
+            return (short) 0;
         } else {
             // GET
             buf[0] = labelLen;
             Util.arrayCopyNonAtomic(cardLabel, (short) 0, buf, (short) 1, labelLen);
-            apdu.setOutgoingAndSend((short) 0, (short)(1 + labelLen));
+            return (short)(1 + labelLen);
         }
     }
 
@@ -690,10 +766,8 @@ public class TapiocaApplet extends Applet {
     // No authentication required — authentikey is public identity.
     // Response: [65-byte uncompressed SECP256K1 public key]
     //
-    private void exportAuthentikey(APDU apdu) {
-        byte[] buf = apdu.getBuffer();
-        short len = sc.getAuthentikeyPublic(buf, (short) 0);
-        apdu.setOutgoingAndSend((short) 0, len);
+    private short exportAuthentikey(byte[] buf) {
+        return sc.getAuthentikeyPublic(buf, (short) 0);
     }
 
     // ── Stub for future unimplemented milestones ──────────────────────────────

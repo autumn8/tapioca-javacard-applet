@@ -140,7 +140,7 @@ All commands use `CLA = 0xB0`. All return `SW = 0x9000` on success unless noted.
 
 ### INS_SETUP (0x2A)
 
-**Authentication:** None. Can only be called once (subsequent calls return `0x9C03`).
+**Authentication:** Requires active secure channel. Can only be called once (subsequent calls return `0x9C03`).
 
 **Request data:**
 
@@ -150,9 +150,9 @@ All commands use `CLA = 0xB0`. All return `SW = 0x9000` on success unless noted.
 
 **Response:** `SW 0x9000`
 
-**Errors:** `0x9C03` — setup already done.
+**Errors:** `0x9C03` — setup already done; `0x9C22` — secure channel not active.
 
-**Example** — PIN = `31 32 33 34` (4 bytes), PUK = `41 42 43 44 45 46` (6 bytes):
+**Example** — PIN = `31 32 33 34` (4 bytes), PUK = `41 42 43 44 45 46` (6 bytes) (shown as inner plaintext before SC wrapping):
 
 ```
 B0 2A 00 00 0C  04 31 32 33 34  06 41 42 43 44 45 46  00
@@ -162,7 +162,7 @@ B0 2A 00 00 0C  04 31 32 33 34  06 41 42 43 44 45 46  00
 
 ### INS_VERIFY_PIN (0x42)
 
-**Authentication:** Requires setup done.
+**Authentication:** Requires setup done and active secure channel.
 
 **Request data:** PIN bytes (4–16 bytes, raw — not length-prefixed).
 
@@ -172,8 +172,9 @@ B0 2A 00 00 0C  04 31 32 33 34  06 41 42 43 44 45 46  00
 
 - `0x63Cx` — wrong PIN; `x` = remaining tries (e.g., `0x63C4` = 4 tries left)
 - `0x9C0C` — PIN blocked
+- `0x9C22` — secure channel not active
 
-**Example** — PIN `31 32 33 34`:
+**Example** — PIN `31 32 33 34` (shown as inner plaintext before SC wrapping):
 
 ```
 B0 42 00 00 04  31 32 33 34  00
@@ -183,7 +184,7 @@ B0 42 00 00 04  31 32 33 34  00
 
 ### INS_CHANGE_PIN (0x44)
 
-**Authentication:** Requires PIN verified in current session.
+**Authentication:** Requires active secure channel and PIN verified in current session.
 
 **Request data:**
 
@@ -191,13 +192,13 @@ B0 42 00 00 04  31 32 33 34  00
 [old_len (1)] [old_pin] [new_len (1)] [new_pin]
 ```
 
-**Errors:** `0x9C06` — PIN not verified; `0x63Cx` — old PIN wrong.
+**Errors:** `0x9C06` — PIN not verified; `0x63Cx` — old PIN wrong; `0x9C22` — secure channel not active.
 
 ---
 
 ### INS_UNBLOCK_PIN (0x46)
 
-**Authentication:** None (the PUK itself provides authentication).
+**Authentication:** Requires active secure channel (PUK itself provides knowledge authentication).
 
 **Request data:**
 
@@ -205,15 +206,15 @@ B0 42 00 00 04  31 32 33 34  00
 [puk_len (1)] [puk] [new_pin_len (1)] [new_pin]
 ```
 
-**Errors:** `0x63Cx` — wrong PUK; `0x9C0C` — PUK blocked (permanent lockout).
+**Errors:** `0x63Cx` — wrong PUK; `0x9C0C` — PUK blocked (permanent lockout); `0x9C22` — secure channel not active.
 
 ---
 
 ### INS_IMPORT_SEED (0x6C)
 
-**Authentication:** Requires PIN verified.
+**Authentication:** Requires active secure channel and PIN verified.
 
-**Request:** `B0 6C 00 00 40 [64-byte BIP-39 seed] 00`
+**Request:** `B0 6C 00 00 40 [64-byte BIP-39 seed] 00` (as inner plaintext before SC wrapping)
 
 The 64-byte seed is the standard BIP-39 output:
 
@@ -221,14 +222,16 @@ The 64-byte seed is the standard BIP-39 output:
 PBKDF2(HMAC-SHA512, mnemonic_words, "mnemonic" + passphrase, iterations=2048, dklen=64)
 ```
 
-**Response:** 32-byte Ed25519 public key at the default Solana path `m/44'/501'/0'`.
+**Response:** 32-byte Ed25519 public key at the default Solana path `m/44'/501'/0'` (encrypted in SC response).
 
 **Timing:** ~2,700 ms (SLIP-0010 derivation on-card is computationally expensive).
+
+**Errors:** `0x9C22` — secure channel not active.
 
 **Notes:**
 
 - Replaces any previously imported seed.
-- Send this command inside the secure channel to protect the seed over NFC.
+- Must be sent inside the secure channel — the 64-byte seed must never cross the air in plaintext.
 
 ---
 
@@ -277,7 +280,7 @@ B0 6D 00 00 0D  03  80 00 00 2C  80 00 01 F5  80 00 00 00  00
 
 ### INS_SIGN_TX (0x6F)
 
-**Authentication:** Requires PIN verified and seed imported.
+**Authentication:** Requires active secure channel, PIN verified, and seed imported.
 
 Signs a Solana transaction message using Ed25519. Supports multi-chunk streaming for messages up to 1,200 bytes.
 
@@ -400,7 +403,17 @@ Wipes everything: PIN, PUK, seed, master key, card label, authentikey, secure ch
 
 The secure channel provides confidentiality and integrity for APDU communication. It uses AES-128 CBC encryption and HMAC-SHA1 message authentication, with session keys derived from a SECP256K1 ECDH exchange.
 
-The secure channel is **currently optional** — all commands work without it. However, commands that transmit sensitive data (PIN, seed) should be wrapped in the secure channel.
+The secure channel is **required** for all sensitive commands. The following commands return `0x9C22` (SW_SECURE_CHANNEL_REQUIRED) if called outside an active secure channel session:
+
+- `INS_SETUP` — PIN and PUK must not cross the air in plaintext
+- `INS_VERIFY_PIN` — PIN must not cross the air in plaintext
+- `INS_CHANGE_PIN`
+- `INS_UNBLOCK_PIN`
+- `INS_IMPORT_SEED` — seed must not cross the air in plaintext
+- `INS_SIGN_TX`
+- `INS_RESET_TO_FACTORY`
+
+Commands that do not transmit sensitive data (`INS_GET_STATUS`, `INS_CARD_LABEL` GET, `INS_GET_PUBLIC_KEY`, `INS_EXPORT_AUTHENTIKEY`, `INS_INIT_SECURE_CHANNEL`) do not require a secure channel.
 
 **The channel is cleared on every applet deselect.** There is no resumption — each new session requires a full handshake.
 
@@ -457,20 +470,23 @@ HMAC-SHA1 outputs 20 bytes. `session_key` uses the first 16 bytes only. `mac_key
 
 ### Reconstructing the Ephemeral Public Key
 
-The card returns only the 32-byte X-coordinate of its ephemeral public key. Reconstruct the full point by trying both Y parities:
+The card returns only the 32-byte X-coordinate of its ephemeral public key. Reconstruct the full point by trying both Y parities and using `sig1` — which signs `[coordX_size(2) | coordX(32)]` with the ephemeral private key — to identify the correct one:
 
 ```
+sig1_message = response[0 : 2 + 32]   // [coordX_size(2) | coordX(32)]
+
 for parity in [0x02, 0x03]:
     compressed = [parity] + coordX
     try:
         pubkey = decode_compressed_secp256k1(compressed)
-        shared_X = ECDH(host_private_key, pubkey).x
-        break   // use this shared_X
+        if verify_ecdsa_sha256(pubkey, sig1, sig1_message):
+            shared_X = ECDH(host_private_key, pubkey).x
+            break   // correct parity found
     except:
         continue
 ```
 
-One of the two parities will always produce a valid point.
+Using sig1 to select the parity is required — the two Y parities produce different ECDH shared secrets (they are distinct points), so computing both and guessing will result in wrong session keys 50% of the time.
 
 ---
 
@@ -533,21 +549,26 @@ Once the handshake is complete, wrap any command inside `INS_PROCESS_SECURE_CHAN
 
 **Decrypting the response:**
 
-If the inner command produces output data, the card's response is encrypted:
+If the inner command produces output data, the card's response is encrypted and MAC-protected:
 
 ```
-[IV(16)] [data_size(2 BE)] [AES-CBC-ciphertext]
+[IV(16)] [data_size(2 BE)] [AES-CBC-ciphertext] [mac_size(2 BE)] [HMAC-SHA1(20)]
 ```
 
-To decrypt:
+To verify and decrypt:
 
 ```
 1. iv         = response[0:16]
 2. data_size  = uint16_BE(response[16:18])
 3. ciphertext = response[18 : 18 + data_size]
-4. padded     = AES-128-CBC-decrypt(session_key, iv, ciphertext)
-5. plaintext  = padded[0 : len(padded) - padded[-1]]   // remove PKCS#7 pad
+4. mac_size   = uint16_BE(response[18 + data_size : 20 + data_size])   // always 20
+5. mac        = response[20 + data_size : 40 + data_size]
+6. Verify: HMAC-SHA1(mac_key, response[0 : 18 + data_size]) == mac
+7. padded     = AES-128-CBC-decrypt(session_key, iv, ciphertext)
+8. plaintext  = padded[0 : len(padded) - padded[-1]]   // remove PKCS#7 pad
 ```
+
+Always verify the MAC before decrypting. A MAC failure indicates a tampered or replayed response.
 
 If the inner command produces no response data (e.g., `INS_VERIFY_PIN` on success), the outer response body is empty — check only the SW.
 
@@ -562,16 +583,17 @@ Complete wire-level sequence for signing a Solana transaction:
 ```
 1.  SELECT applet  (AID: 53 6F 6C 61 6E 61 00)
 2.  INS_GET_STATUS → check setup_done and is_seeded
-3.  INS_EXPORT_AUTHENTIKEY → get card identity pubkey
+3.  INS_EXPORT_AUTHENTIKEY → get card identity pubkey (optional but recommended for verification)
 4.  INS_INIT_SECURE_CHANNEL → ECDH handshake, derive session keys
-5.  INS_VERIFY_PIN (wrapped in secure channel)
-6.  INS_IMPORT_SEED (wrapped, first session only) → 64-byte BIP-39 seed
-7.  Build Solana transaction, serialize the message bytes
-8.  INS_SIGN_TX (wrapped or plain) with path m/44'/501'/0' and message bytes
+5.  INS_SETUP (wrapped — first use only) → set PIN + PUK
+6.  INS_VERIFY_PIN (wrapped)
+7.  INS_IMPORT_SEED (wrapped, first session only) → 64-byte BIP-39 seed
+8.  Build Solana transaction, serialize the message bytes
+9.  INS_SIGN_TX (wrapped) with path m/44'/501'/0' and message bytes
     — single-chunk if message ≤ ~240 bytes (accounting for path prefix)
     — multi-chunk otherwise
-9.  Receive 64-byte Ed25519 signature
-10. Attach signature to transaction and broadcast
+10. Receive 64-byte Ed25519 signature (MAC-verified, decrypted by host)
+11. Attach signature to transaction and broadcast
 ```
 
 ### Solana Address from Public Key

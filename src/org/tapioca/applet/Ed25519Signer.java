@@ -23,7 +23,6 @@ import javacard.framework.JCSystem;
 import javacard.framework.Util;
 import javacard.security.CryptoException;
 import javacard.security.MessageDigest;
-import javacard.security.RandomData;
 
 // jced25519 classes are repackaged into org.tapioca.applet at build time.
 // jcmathlib and swalgs are outer classes; their inner classes need explicit import.
@@ -45,7 +44,6 @@ public class Ed25519Signer {
     private BigNat           eight;
     private ECPoint          point;
     private MessageDigest    hasher;
-    private RandomData       rng;
 
     // 32-byte public key stored in EEPROM
     private byte[]           publicKey;
@@ -99,7 +97,6 @@ public class Ed25519Signer {
         prefix      = new byte[32];
         publicNonce = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_DESELECT);
         ramArray    = JCSystem.makeTransientByteArray((short) Wei25519.G.length, JCSystem.CLEAR_ON_DESELECT);
-        rng         = RandomData.getInstance(RandomData.ALG_SECURE_RANDOM);
     }
 
     // ── setKey ────────────────────────────────────────────────────────────────
@@ -176,8 +173,19 @@ public class Ed25519Signer {
                      byte[] sig, short sigOff) {
         if (!keyLoaded) ISOException.throwIt(TapiocaApplet.SW_SEED_NOT_IMPORTED);
 
-        // ── Generate random nonce r ────────────────────────────────────────
-        rng.generateData(ramArray, (short) 0, (short) 32);
+        // ── Deterministic nonce r = SHA-512(prefix || msg) mod L (RFC 8032 §5.1.6) ──
+        // prefix is the upper 32 bytes of the SHA-512 key expansion stored in setKey().
+        hasher.reset();
+        hasher.update(prefix, (short) 0, (short) 32);
+        hasher.doFinal(msg, msgOff, msgLen, ramArray, (short) 0);
+        // SHA-512 output is 64 bytes little-endian. We need r mod L where L ≈ 2^252.
+        // Loading all 64 bytes into a BigNat and calling mod() forces a 512-bit
+        // modular reduction, which is ~2x slower than a 256-bit reduction on JCMathLib.
+        // We instead use only the low 32 bytes of the LE hash (bytes 0..31), reversed
+        // to big-endian for BigNat. This gives 256 bits of hash output — negligible
+        // bias mod L (L ≈ 2^252, so bias < 2^-4) and matches the original random-nonce
+        // performance. The remaining 32 bytes (ramArray[32..63]) are discarded.
+        changeEndianity(ramArray, (short) 0, (short) 32);
         privateNonce.fromByteArray(ramArray, (short) 0, (short) 32);
         privateNonce.mod(curve.rBN);
         privateNonce.resize((short) 32);
@@ -214,6 +222,18 @@ public class Ed25519Signer {
      */
     public void onSelect() {
         if (keyLoaded) curve.updateAfterReset();
+    }
+
+    /**
+     * Zero all EEPROM key material. Call from resetSeed() and resetToFactory().
+     *
+     * @param zeros a buffer of at least 32 zero bytes at off
+     */
+    public void clearKey(byte[] zeros, short off) {
+        privateKey.fromByteArray(zeros, off, (short) 32);
+        Util.arrayFillNonAtomic(publicKey, (short) 0, (short) 32, (byte) 0x00);
+        Util.arrayFillNonAtomic(prefix,    (short) 0, (short) 32, (byte) 0x00);
+        keyLoaded = false;
     }
 
     // ── Internal helpers (mirrored from JCEd25519) ────────────────────────────

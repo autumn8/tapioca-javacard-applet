@@ -243,9 +243,12 @@ public class SecureChannel {
             sc_buffer, OFFSET_SC_MACKEY, SIZE_SC_MACKEY,
             buf, offset, (short)(SIZE_SC_IV + 2 + dataSize),
             tmp, (short) 0);
-        if (Util.arrayCompare(tmp, (short) 0,
-                buf, (short)(offset + SIZE_SC_IV + 2 + dataSize + 2),
-                (short) 20) != (byte) 0)
+        // Constant-time comparison — no early exit to prevent timing oracle
+        byte diff = 0;
+        short macStart = (short)(offset + SIZE_SC_IV + 2 + dataSize + 2);
+        for (short i = 0; i < (short) 20; i++)
+            diff |= (byte)(tmp[i] ^ buf[(short)(macStart + i)]);
+        if (diff != (byte) 0)
             ISOException.throwIt(TapiocaApplet.SW_SECURE_CHANNEL_WRONG_MAC);
 
         // ── Validate IV ───────────────────────────────────────────────────────
@@ -299,7 +302,16 @@ public class SecureChannel {
                             buf, (short) 18);
 
         Util.setShort(buf, (short) 16, encSize);
-        return (short)(18 + encSize);
+
+        // Append HMAC-SHA1(mac_key, IV || data_size || ciphertext) for response integrity
+        short coveredLen = (short)(18 + encSize);
+        HmacSha160.computeHmacSha160(
+            sc_buffer, OFFSET_SC_MACKEY, SIZE_SC_MACKEY,
+            buf, (short) 0, coveredLen,
+            tmp, (short) 0);
+        Util.setShort(buf, coveredLen, (short) 20);
+        Util.arrayCopyNonAtomic(tmp, (short) 0, buf, (short)(coveredLen + 2), (short) 20);
+        return (short)(coveredLen + 22);
     }
 
     /**

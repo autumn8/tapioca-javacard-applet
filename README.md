@@ -20,16 +20,16 @@ Target hardware: **J3R180** (JCOP 4, ~180 KB EEPROM). Production target: **J3R45
 
 ## Hardware
 
-| Property        | J3R180 (Phase 1)                         | J3R452 (Phase 2)             |
-| --------------- | ---------------------------------------- | ---------------------------- |
-| Platform        | NXP JCOP 4                               | NXP JCOP 4.5                 |
-| JavaCard spec   | 3.0.5                                    | 3.0.5 + NXP extensions       |
-| EEPROM          | ~180 KB (~85 KB user)                    | ~452 KB                      |
-| RAM (transient) | ~8 KB                                    | ~16 KB                       |
-| Interface       | ISO 7816 + ISO 14443-4 (NFC)             | ISO 7816 + ISO 14443-4 (NFC) |
-| Ed25519         | Software (JCMathLib) — confirmed working | Native NXP — pending SDK     |
-| Key derivation  | ~2,700 ms (first or new path)            | < 1 s (estimated)            |
-| Sign time       | ~1,440 ms (cached path) / ~4,200 ms (new path) | < 1 s (estimated)      |
+| Property        | J3R180 (Phase 1)                               | J3R452 (Phase 2)             |
+| --------------- | ---------------------------------------------- | ---------------------------- |
+| Platform        | NXP JCOP 4                                     | NXP JCOP 4.5                 |
+| JavaCard spec   | 3.0.5                                          | 3.0.5 + NXP extensions       |
+| EEPROM          | ~180 KB (~85 KB user)                          | ~452 KB                      |
+| RAM (transient) | ~8 KB                                          | ~16 KB                       |
+| Interface       | ISO 7816 + ISO 14443-4 (NFC)                   | ISO 7816 + ISO 14443-4 (NFC) |
+| Ed25519         | Software (JCMathLib) — confirmed working       | Native NXP — pending SDK     |
+| Key derivation  | ~2,700 ms (first or new path)                  | < 1 s (estimated)            |
+| Sign time       | ~1,440 ms (cached path) / ~4,200 ms (new path) | < 1 s (estimated)            |
 
 ---
 
@@ -88,8 +88,8 @@ tapioca-javacard-applet/
 ### 1. Clone and set up dependencies
 
 ```sh
-git clone <repo-url> solana-applet
-cd solana-applet
+git clone <repo-url> tapioca-javacard-applet
+cd tapioca-javacard-applet
 bash setup.sh
 ```
 
@@ -170,22 +170,24 @@ npm start
 
 ### Command Catalog
 
-| Command                      | INS    | Auth required | Description                           |
-| ---------------------------- | ------ | ------------- | ------------------------------------- |
-| `INS_SETUP`                  | `0x2A` | No            | Initialize card — set PIN/PUK         |
-| `INS_GET_STATUS`             | `0x3C` | No            | Card version, PIN state, seed status  |
-| `INS_CARD_LABEL`             | `0x3D` | PIN (write)   | Get or set UTF-8 card label           |
-| `INS_VERIFY_PIN`             | `0x42` | No            | Authenticate; unlocks session         |
-| `INS_CHANGE_PIN`             | `0x44` | PIN           | Replace PIN                           |
-| `INS_UNBLOCK_PIN`            | `0x46` | No            | Reset PIN using PUK                   |
-| `INS_IMPORT_SEED`            | `0x6C` | PIN           | Store 64-byte BIP-39 seed             |
-| `INS_RESET_SEED`             | `0x77` | PIN           | Wipe seed, keep PIN state             |
-| `INS_GET_PUBLIC_KEY`         | `0x6D` | PIN           | Derive Ed25519 pubkey at path         |
-| `INS_SIGN_TX`                | `0x6F` | PIN           | Stream + sign Solana transaction      |
-| `INS_EXPORT_AUTHENTIKEY`     | `0x73` | No            | Export 65-byte secp256k1 identity key |
-| `INS_INIT_SECURE_CHANNEL`    | `0x81` | No            | ECDH handshake for secure channel     |
-| `INS_PROCESS_SECURE_CHANNEL` | `0x82` | No            | Encrypted command envelope            |
-| `INS_RESET_TO_FACTORY`       | `0xFF` | PIN           | Wipe everything                       |
+| Command                      | INS    | Auth required        | Description                           |
+| ---------------------------- | ------ | -------------------- | ------------------------------------- |
+| `INS_SETUP`                  | `0x2A` | SC required          | Initialize card — set PIN/PUK         |
+| `INS_GET_STATUS`             | `0x3C` | No                   | Card version, PIN state, seed status  |
+| `INS_CARD_LABEL`             | `0x3D` | PIN (write)          | Get or set UTF-8 card label           |
+| `INS_VERIFY_PIN`             | `0x42` | SC required          | Authenticate; unlocks session         |
+| `INS_CHANGE_PIN`             | `0x44` | SC + PIN             | Replace PIN                           |
+| `INS_UNBLOCK_PIN`            | `0x46` | SC required          | Reset PIN using PUK                   |
+| `INS_IMPORT_SEED`            | `0x6C` | SC + PIN             | Store 64-byte BIP-39 seed             |
+| `INS_RESET_SEED`             | `0x77` | PIN                  | Wipe seed, keep PIN state             |
+| `INS_GET_PUBLIC_KEY`         | `0x6D` | PIN                  | Derive Ed25519 pubkey at path         |
+| `INS_SIGN_TX`                | `0x6F` | SC + PIN             | Stream + sign Solana transaction      |
+| `INS_EXPORT_AUTHENTIKEY`     | `0x73` | No                   | Export 65-byte secp256k1 identity key |
+| `INS_INIT_SECURE_CHANNEL`    | `0x81` | No                   | ECDH handshake for secure channel     |
+| `INS_PROCESS_SECURE_CHANNEL` | `0x82` | Active SC session    | Encrypted command envelope            |
+| `INS_RESET_TO_FACTORY`       | `0xFF` | SC + PIN             | Wipe everything                       |
+
+SC = active secure channel session required (`0x9C22` returned otherwise).
 
 ### INS_SIGN_TX chunking
 
@@ -218,6 +220,7 @@ All path indexes must have bit 31 set (hardened). Standard Solana path: `m/44'/5
 | `0x9C0F` | Invalid parameter                    |
 | `0x9C14` | Seed not imported                    |
 | `0x9C21` | Secure channel not initialized       |
+| `0x9C22` | Secure channel required              |
 | `0x9C23` | Secure channel wrong MAC             |
 | `0xFF00` | Factory reset complete               |
 
@@ -225,20 +228,21 @@ All path indexes must have bit 31 set (hardened). Standard Solana path: `m/44'/5
 
 ## Secure Channel
 
-The applet implements AES-128 CBC + HMAC-SHA1 encrypted communication, compatible with the Satochip secure channel protocol.
+The applet implements AES-128 CBC + HMAC-SHA1 encrypted communication, compatible with the Satochip secure channel protocol. The secure channel is **required** for all commands that transmit sensitive data (PIN, PUK, seed, signatures).
 
 **Handshake flow:**
 
 1. `INS_EXPORT_AUTHENTIKEY` — get card's persistent secp256k1 identity pubkey
-2. `INS_INIT_SECURE_CHANNEL` — send host ephemeral pubkey; receive card ephemeral pubkey + two ECDSA signatures
-3. Verify both signatures; derive session keys from ECDH shared secret
-4. Wrap all subsequent commands with `INS_PROCESS_SECURE_CHANNEL`
+2. `INS_INIT_SECURE_CHANNEL` — send host ephemeral pubkey; receive card ephemeral X-coordinate + two ECDSA signatures
+3. Use `sig1` to determine the correct Y parity of the card's ephemeral pubkey; compute ECDH shared secret
+4. Verify `sig2` against the authentikey to confirm card identity
+5. Derive session keys from the ECDH shared X-coordinate
+6. Wrap all sensitive commands with `INS_PROCESS_SECURE_CHANNEL`
 
 Session keys (derived via HMAC-SHA1 from ECDH shared secret):
 
-- `sc_enc` — 16-byte AES-128 key (CBC encryption)
-- `sc_mac` — 20-byte HMAC-SHA1 key (MAC)
-- `sc_iv` — 16-byte IV (incremented per command)
+- `session_key` — 16-byte AES-128 key (CBC encryption)
+- `mac_key` — 20-byte HMAC-SHA1 key (MAC on both requests and responses)
 
 See [PROTOCOL.md](PROTOCOL.md) for the complete wire-level protocol reference.
 
