@@ -1,0 +1,8 @@
+build/
+*.cap
+lib/jced25519/
+.venv/
+__pycache__/
+*.pyc
+**/node_modules/
+.DS_Store

@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="TapiocaApplet" default="build" basedir=".">
+
+    <!--
+        Solana Signing Applet — Phase 1 build
+        Target: NXP JCOP 4 (J3R180, J3R452)
+        JavaCard SDK: jc305u3_kit
+
+        Dependencies (fetched by setup.sh):
+          - JCEd25519 (includes bundled JCMathLib)  → lib/jced25519/
+
+        Usage:
+          ant           — build TapiocaApplet CAP
+          ant clean     — remove build artifacts
+          ant info      — verify paths before building
+    -->
+
+    <property name="applet.name"    value="TapiocaApplet"/>
+    <property name="applet.version" value="0.1"/>
+    <property name="applet.class"   value="org.tapioca.applet.TapiocaApplet"/>
+
+    <!-- AID: "Solana" in ASCII hex = 536F6C616E61 (6 bytes) -->
+    <property name="package.aid"    value="536F6C616E61"/>
+    <property name="applet.aid"     value="536F6C616E6100"/>
+
+    <!-- Paths -->
+    <property name="jckit"          value="sdks/jc305u3_kit"/>
+    <property name="antjc.jar"      value="lib/ant-javacard.jar"/>
+    <property name="src.dir"        value="src"/>
+
+    <!--
+        JCEd25519 source (includes JCMathLib).        
+    -->
+    <property name="jced25519.src"  value="lib/jced25519/applet/src/main/java"/>
+
+    <!-- Build temp dir for patched sources -->
+    <property name="patched.src"    value="build/patched_src"/>
+
+    <property name="output.file"    value="${applet.name}-${applet.version}.cap"/>
+
+    <taskdef name="javacard"
+             classname="pro.javacard.ant.JavaCard"
+             classpath="${antjc.jar}"/>
+
+    <!-- ============================================================ -->
+    <!-- info: verify prerequisites                                   -->
+    <!-- ============================================================ -->
+    <target name="info" description="Check build prerequisites">
+        <echo message="Applet:       ${applet.name} v${applet.version}"/>
+        <echo message="Class:        ${applet.class}"/>
+        <echo message="Package AID:  ${package.aid}"/>
+        <echo message="Applet AID:   ${applet.aid}"/>
+        <echo message="JC Kit:       ${jckit}"/>
+        <echo message="Output:       ${output.file}"/>
+
+        <available file="${jckit}" type="dir" property="jckit.present"/>
+        <fail unless="jckit.present"
+              message="jc305u3_kit not found at sdks/jc305u3_kit — check README for setup instructions"/>
+
+        <available file="${jced25519.src}" type="dir" property="jced25519.present"/>
+        <fail unless="jced25519.present"
+              message="JCEd25519 source not found. Run: bash setup.sh"/>
+
+        <echo message="All prerequisites found — ready to build."/>
+    </target>
+
+    <!-- ============================================================ -->
+    <!-- patch: copy JCEd25519 source and set JCOP4_P71              -->
+    <!-- ============================================================ -->
+    <target name="patch" depends="info">
+        <delete dir="${patched.src}"/>
+        <mkdir  dir="${patched.src}"/>
+
+        <copy todir="${patched.src}">
+            <fileset dir="${jced25519.src}"/>
+        </copy>
+
+        <!-- Patch JCEd25519 card type to hardware-accelerated JCOP4 -->
+        <replace file="${patched.src}/jced25519/JCEd25519.java"
+                 token="OperationSupport.SIMULATOR"
+                 value="OperationSupport.JCOP4_P71"/>
+
+        <!--
+            Repackage jced25519 sources into org.tapioca.applet so all classes
+            live in one JavaCard package. This avoids needing a jced25519.exp
+            export file for cross-package references at converter time.
+        -->
+        <replace dir="${patched.src}" includes="**/*.java"
+                 token="package jced25519;"
+                 value="package org.tapioca.applet;"/>
+        <!-- Rewrite intra-jced25519 imports to the new package name -->
+        <replace dir="${patched.src}" includes="**/*.java"
+                 token="import jced25519.jcmathlib.*;"
+                 value="import org.tapioca.applet.jcmathlib.*;"/>
+        <replace dir="${patched.src}" includes="**/*.java"
+                 token="import jced25519.swalgs.*;"
+                 value="import org.tapioca.applet.swalgs.*;"/>
+    </target>
+
+    <!-- ============================================================ -->
+    <!-- build                                                        -->
+    <!-- ============================================================ -->
+    <target name="build" depends="patch" description="Build TapiocaApplet CAP">
+        <javacard jckit="${jckit}">
+            <cap aid="${package.aid}"
+                 version="${applet.version}"
+                 output="${output.file}"
+                 sources="${src.dir}:${patched.src}">
+                <applet class="${applet.class}"
+                        aid="${applet.aid}"/>
+            </cap>
+        </javacard>
+        <echo message="Built: ${output.file}"/>
+    </target>
+
+    <!-- ============================================================ -->
+    <!-- clean                                                        -->
+    <!-- ============================================================ -->
+    <target name="clean" description="Remove build artifacts">
+        <delete dir="build"/>
+        <delete file="${output.file}"/>
+        <echo message="Cleaned."/>
+    </target>
+
+</project>
