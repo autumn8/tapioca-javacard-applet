@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "start": "ts-node index.ts",
+    "test:e2e": "ts-node applet.test.ts",
+    "test:devnet-tx": "ts-node devnet-tx.ts",
     "build": "tsc --noEmit"
   },
   "dependencies": {

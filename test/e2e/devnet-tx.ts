@@ -20,7 +20,9 @@
  */
 
 // ⚠️  DEVNET ONLY — never use this mnemonic on mainnet; it is publicly known.
-//test run : npm start "always thunder family peasant ancient pioneer nut vote detect monster shaft timber prepare program clump awake unable error garden shield sand fossil orphan clump" -- --pin 5678
+// Ensure card is working from a clean install.
+// Run :
+// npm test:devnet-tx "always thunder family peasant ancient pioneer nut vote detect monster shaft timber prepare program clump awake unable error garden shield sand fossil orphan clump" -- --pin 5678
 
 import * as crypto from 'crypto';
 import {
@@ -120,11 +122,13 @@ class SecureChannel {
   processHandshakeResponse(respData: Buffer): void {
     // Parse: [coordX_size(2) | coordX(32) | sig1_size(2) | sig1 | sig2_size(2) | sig2]
     const coordXSize = respData.readUInt16BE(0);
-    if (coordXSize !== 32) throw new Error(`Unexpected coordX size: ${coordXSize}`);
+    if (coordXSize !== 32)
+      throw new Error(`Unexpected coordX size: ${coordXSize}`);
     const coordX = respData.subarray(2, 2 + coordXSize);
 
     let off = 2 + coordXSize;
-    const sig1Size = respData.readUInt16BE(off); off += 2;
+    const sig1Size = respData.readUInt16BE(off);
+    off += 2;
     const sig1 = respData.subarray(off, off + sig1Size);
 
     // The data signed by sig1: [coordX_size(2) | coordX(32)]
@@ -133,14 +137,21 @@ class SecureChannel {
     // DER SPKI wrapper for a 33-byte compressed secp256k1 public key.
     // Structure: SEQUENCE { SEQUENCE { OID id-ecPublicKey, OID secp256k1 } BIT STRING { key } }
     //   30 36 30 10 06 07 2a 86 48 ce 3d 02 01 06 05 2b 81 04 00 0a 03 22 00 <33 bytes>
-    const spkiPrefix = Buffer.from('3036301006072a8648ce3d020106052b8104000a032200', 'hex');
+    const spkiPrefix = Buffer.from(
+      '3036301006072a8648ce3d020106052b8104000a032200',
+      'hex'
+    );
 
     let sharedX: Buffer | null = null;
     for (const parity of [0x02, 0x03]) {
       const cardPubCompressed = Buffer.concat([Buffer.from([parity]), coordX]);
       const spkiDer = Buffer.concat([spkiPrefix, cardPubCompressed]);
       try {
-        const pubKeyObj = crypto.createPublicKey({ key: spkiDer, format: 'der', type: 'spki' });
+        const pubKeyObj = crypto.createPublicKey({
+          key: spkiDer,
+          format: 'der',
+          type: 'spki',
+        });
         const verifier = crypto.createVerify('SHA256');
         verifier.update(sig1Message);
         if (verifier.verify(pubKeyObj, sig1)) {
@@ -152,10 +163,15 @@ class SecureChannel {
       }
     }
     if (!sharedX)
-      throw new Error('SC handshake: sig1 did not verify for either Y parity — handshake failed');
+      throw new Error(
+        'SC handshake: sig1 did not verify for either Y parity — handshake failed'
+      );
 
-    this.sessionKey = this.hmacSha1(sharedX, Buffer.from('sc_key')).subarray(0, 16);
-    this.macKey     = this.hmacSha1(sharedX, Buffer.from('sc_mac'));
+    this.sessionKey = this.hmacSha1(sharedX, Buffer.from('sc_key')).subarray(
+      0,
+      16
+    );
+    this.macKey = this.hmacSha1(sharedX, Buffer.from('sc_mac'));
   }
 
   /**
@@ -192,7 +208,13 @@ class SecureChannel {
     const mac = this.hmacSha1(this.macKey, macInput);
 
     // Assembled SC payload: IV(16) | data_size(2) | ciphertext | mac_size(2=0x0014) | mac(20)
-    return Buffer.concat([iv, dataSize, encrypted, Buffer.from([0x00, 0x14]), mac]);
+    return Buffer.concat([
+      iv,
+      dataSize,
+      encrypted,
+      Buffer.from([0x00, 0x14]),
+      mac,
+    ]);
   }
 
   /**
@@ -204,8 +226,8 @@ class SecureChannel {
     // Minimum encrypted response: IV(16) + data_size(2) + 1 block(16) + mac_size(2) + mac(20) = 56
     if (data.length < 56) return Buffer.alloc(0);
 
-    const iv        = data.subarray(0, 16);
-    const dataSize  = data.readUInt16BE(16);
+    const iv = data.subarray(0, 16);
+    const dataSize = data.readUInt16BE(16);
     const ciphertext = data.subarray(18, 18 + dataSize);
 
     // Verify response MAC: HMAC-SHA1(mac_key, IV || data_size(2) || ciphertext)
@@ -214,18 +236,27 @@ class SecureChannel {
       const macSize = data.readUInt16BE(macOffset);
       if (macSize === 20 && data.length >= macOffset + 2 + 20) {
         const receivedMac = data.subarray(macOffset + 2, macOffset + 2 + 20);
-        const covered     = data.subarray(0, macOffset);
+        const covered = data.subarray(0, macOffset);
         const expectedMac = this.hmacSha1(this.macKey, covered);
         if (!crypto.timingSafeEqual(receivedMac, expectedMac)) {
-          throw new Error('Secure channel response MAC verification failed — possible tampering');
+          throw new Error(
+            'Secure channel response MAC verification failed — possible tampering'
+          );
         }
       }
     }
 
     // Decrypt
-    const decipher = crypto.createDecipheriv('aes-128-cbc', this.sessionKey, iv);
+    const decipher = crypto.createDecipheriv(
+      'aes-128-cbc',
+      this.sessionKey,
+      iv
+    );
     decipher.setAutoPadding(false);
-    const padded = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    const padded = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final(),
+    ]);
 
     // Strip PKCS#7 padding
     const padByte = padded[padded.length - 1];
@@ -370,12 +401,18 @@ async function scApdu(
 ): Promise<Buffer> {
   const wrappedPayload = sc.wrapCommand(ins, p1, p2, payload);
   const outerCmd = Buffer.concat([
-    Buffer.from([CLA, INS.PROCESS_SECURE_CHANNEL, 0x00, 0x00, wrappedPayload.length]),
+    Buffer.from([
+      CLA,
+      INS.PROCESS_SECURE_CHANNEL,
+      0x00,
+      0x00,
+      wrappedPayload.length,
+    ]),
     wrappedPayload,
     Buffer.from([0x00]),
   ]);
   const outerResp = await transmit(card, outerCmd);
-  const outerSW   = sw(outerResp);
+  const outerSW = sw(outerResp);
   const outerData = respData(outerResp);
 
   if (outerSW !== SW.OK) {
@@ -411,9 +448,17 @@ async function initSecureChannel(card: CardConn): Promise<SecureChannel> {
   const sc = new SecureChannel();
   const hostPubKey = sc.getHostPublicKey(); // 65-byte uncompressed SECP256K1 pubkey
 
-  const resp = await apdu(card, INS.INIT_SECURE_CHANNEL, 0x00, 0x00, hostPubKey);
+  const resp = await apdu(
+    card,
+    INS.INIT_SECURE_CHANNEL,
+    0x00,
+    0x00,
+    hostPubKey
+  );
   if (sw(resp) !== SW.OK)
-    throw new Error(`INIT_SECURE_CHANNEL failed: ${sw(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `INIT_SECURE_CHANNEL failed: ${sw(resp).toString(16).toUpperCase()}`
+    );
 
   sc.processHandshakeResponse(respData(resp));
   return sc;
@@ -445,7 +490,11 @@ async function getStatus(card: CardConn): Promise<CardStatus> {
 
 // ── Card: SETUP ───────────────────────────────────────────────────────────────
 
-async function setupCard(card: CardConn, sc: SecureChannel, pin: Buffer): Promise<void> {
+async function setupCard(
+  card: CardConn,
+  sc: SecureChannel,
+  pin: Buffer
+): Promise<void> {
   const payload = Buffer.concat([
     Buffer.from([pin.length]),
     pin,
@@ -459,7 +508,11 @@ async function setupCard(card: CardConn, sc: SecureChannel, pin: Buffer): Promis
 
 // ── Card: VERIFY_PIN ──────────────────────────────────────────────────────────
 
-async function verifyPin(card: CardConn, sc: SecureChannel, pin: Buffer): Promise<void> {
+async function verifyPin(
+  card: CardConn,
+  sc: SecureChannel,
+  pin: Buffer
+): Promise<void> {
   const resp = await scApdu(card, sc, INS.VERIFY_PIN, 0x00, 0x00, pin);
   if (sw(resp) !== SW.OK) {
     const tries = sw(resp) & 0x0f;
@@ -469,7 +522,11 @@ async function verifyPin(card: CardConn, sc: SecureChannel, pin: Buffer): Promis
 
 // ── Card: IMPORT_SEED ─────────────────────────────────────────────────────────
 
-async function importSeed(card: CardConn, sc: SecureChannel, seed64: Buffer): Promise<Buffer> {
+async function importSeed(
+  card: CardConn,
+  sc: SecureChannel,
+  seed64: Buffer
+): Promise<Buffer> {
   if (seed64.length !== 64) throw new Error('Seed must be 64 bytes');
   const resp = await scApdu(card, sc, INS.IMPORT_SEED, 0x00, 0x00, seed64);
   if (sw(resp) !== SW.OK)
@@ -481,11 +538,15 @@ async function importSeed(card: CardConn, sc: SecureChannel, seed64: Buffer): Pr
 
 // ── Card: GET_PUBLIC_KEY ──────────────────────────────────────────────────────
 
-async function getPublicKey(card: CardConn, path: number[]): Promise<Buffer> {
+async function getPublicKey(
+  card: CardConn,
+  sc: SecureChannel,
+  path: number[]
+): Promise<Buffer> {
   const buf = Buffer.alloc(1 + path.length * 4);
   buf[0] = path.length;
   for (let i = 0; i < path.length; i++) buf.writeUInt32BE(path[i], 1 + i * 4);
-  const resp = await apdu(card, INS.GET_PUBLIC_KEY, 0x00, 0x00, buf);
+  const resp = await scApdu(card, sc, INS.GET_PUBLIC_KEY, 0x00, 0x00, buf);
   if (sw(resp) !== SW.OK)
     throw new Error(
       `GET_PUBLIC_KEY failed: ${sw(resp).toString(16).toUpperCase()}`
@@ -522,7 +583,8 @@ async function signTx(
   if (chunks.length === 0) {
     // Entire message fits in one APDU
     resp = await scApdu(
-      card, sc,
+      card,
+      sc,
       INS.SIGN_TX,
       P1.FIRST_LAST,
       0x00,
@@ -535,7 +597,8 @@ async function signTx(
 
   // First chunk
   resp = await scApdu(
-    card, sc,
+    card,
+    sc,
     INS.SIGN_TX,
     P1.FIRST,
     0x00,
@@ -548,7 +611,14 @@ async function signTx(
 
   // Middle chunks
   for (let i = 0; i < chunks.length - 1; i++) {
-    resp = await scApdu(card, sc, INS.SIGN_TX, P1.CONTINUATION, 0x00, chunks[i]);
+    resp = await scApdu(
+      card,
+      sc,
+      INS.SIGN_TX,
+      P1.CONTINUATION,
+      0x00,
+      chunks[i]
+    );
     if (sw(resp) !== SW.OK)
       throw new Error(
         `SIGN_TX continuation failed: ${sw(resp).toString(16).toUpperCase()}`
@@ -557,7 +627,8 @@ async function signTx(
 
   // Last chunk — returns 64-byte signature
   resp = await scApdu(
-    card, sc,
+    card,
+    sc,
     INS.SIGN_TX,
     P1.LAST,
     0x00,
@@ -658,7 +729,7 @@ async function main(): Promise<void> {
     log(`  Seed imported in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   } else {
     log('  Card already seeded — reading public key...');
-    pubkeyBytes = await getPublicKey(card, SOLANA_PATH);
+    pubkeyBytes = await getPublicKey(card, sc, SOLANA_PATH);
   }
 
   const address = new PublicKey(pubkeyBytes);
