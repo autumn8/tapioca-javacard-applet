@@ -77,23 +77,32 @@ class SecureChannel {
 
   processHandshakeResponse(respData: Buffer): void {
     const coordXSize = respData.readUInt16BE(0);
-    if (coordXSize !== 32) throw new Error(`Unexpected coordX size: ${coordXSize}`);
+    if (coordXSize !== 32)
+      throw new Error(`Unexpected coordX size: ${coordXSize}`);
     const coordX = respData.subarray(2, 2 + coordXSize);
 
     let off = 2 + coordXSize;
-    const sig1Size = respData.readUInt16BE(off); off += 2;
+    const sig1Size = respData.readUInt16BE(off);
+    off += 2;
     const sig1 = respData.subarray(off, off + sig1Size);
 
     const sig1Message = respData.subarray(0, 2 + coordXSize);
 
-    const spkiPrefix = Buffer.from('3036301006072a8648ce3d020106052b8104000a032200', 'hex');
+    const spkiPrefix = Buffer.from(
+      '3036301006072a8648ce3d020106052b8104000a032200',
+      'hex'
+    );
 
     let sharedX: Buffer | null = null;
     for (const parity of [0x02, 0x03]) {
       const cardPubCompressed = Buffer.concat([Buffer.from([parity]), coordX]);
       const spkiDer = Buffer.concat([spkiPrefix, cardPubCompressed]);
       try {
-        const pubKeyObj = crypto.createPublicKey({ key: spkiDer, format: 'der', type: 'spki' });
+        const pubKeyObj = crypto.createPublicKey({
+          key: spkiDer,
+          format: 'der',
+          type: 'spki',
+        });
         const verifier = crypto.createVerify('SHA256');
         verifier.update(sig1Message);
         if (verifier.verify(pubKeyObj, sig1)) {
@@ -107,8 +116,11 @@ class SecureChannel {
     if (!sharedX)
       throw new Error('SC handshake: sig1 did not verify for either Y parity');
 
-    this.sessionKey = this.hmacSha1(sharedX, Buffer.from('sc_key')).subarray(0, 16);
-    this.macKey     = this.hmacSha1(sharedX, Buffer.from('sc_mac'));
+    this.sessionKey = this.hmacSha1(sharedX, Buffer.from('sc_key')).subarray(
+      0,
+      16
+    );
+    this.macKey = this.hmacSha1(sharedX, Buffer.from('sc_mac'));
   }
 
   wrapCommand(ins: number, p1: number, p2: number, data?: Buffer): Buffer {
@@ -135,14 +147,20 @@ class SecureChannel {
     const macInput = Buffer.concat([iv, dataSize, encrypted]);
     const mac = this.hmacSha1(this.macKey, macInput);
 
-    return Buffer.concat([iv, dataSize, encrypted, Buffer.from([0x00, 0x14]), mac]);
+    return Buffer.concat([
+      iv,
+      dataSize,
+      encrypted,
+      Buffer.from([0x00, 0x14]),
+      mac,
+    ]);
   }
 
   unwrapResponse(data: Buffer): Buffer {
     if (data.length < 56) return Buffer.alloc(0);
 
-    const iv        = data.subarray(0, 16);
-    const dataSize  = data.readUInt16BE(16);
+    const iv = data.subarray(0, 16);
+    const dataSize = data.readUInt16BE(16);
     const ciphertext = data.subarray(18, 18 + dataSize);
 
     const macOffset = 18 + dataSize;
@@ -150,7 +168,7 @@ class SecureChannel {
       const macSize = data.readUInt16BE(macOffset);
       if (macSize === 20 && data.length >= macOffset + 2 + 20) {
         const receivedMac = data.subarray(macOffset + 2, macOffset + 2 + 20);
-        const covered     = data.subarray(0, macOffset);
+        const covered = data.subarray(0, macOffset);
         const expectedMac = this.hmacSha1(this.macKey, covered);
         if (!crypto.timingSafeEqual(receivedMac, expectedMac)) {
           throw new Error('Secure channel response MAC verification failed');
@@ -158,9 +176,16 @@ class SecureChannel {
       }
     }
 
-    const decipher = crypto.createDecipheriv('aes-128-cbc', this.sessionKey, iv);
+    const decipher = crypto.createDecipheriv(
+      'aes-128-cbc',
+      this.sessionKey,
+      iv
+    );
     decipher.setAutoPadding(false);
-    const decPadded = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    const decPadded = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final(),
+    ]);
 
     const padByte = decPadded[decPadded.length - 1];
     return decPadded.subarray(0, decPadded.length - padByte);
@@ -293,12 +318,18 @@ async function scApdu(
 ): Promise<Buffer> {
   const wrappedPayload = sc.wrapCommand(ins, p1, p2, payload);
   const outerCmd = Buffer.concat([
-    Buffer.from([CLA, INS.PROCESS_SECURE_CHANNEL, 0x00, 0x00, wrappedPayload.length]),
+    Buffer.from([
+      CLA,
+      INS.PROCESS_SECURE_CHANNEL,
+      0x00,
+      0x00,
+      wrappedPayload.length,
+    ]),
     wrappedPayload,
     Buffer.from([0x00]),
   ]);
   const outerResp = await transmit(card, outerCmd);
-  const outerSW   = swCode(outerResp);
+  const outerSW = swCode(outerResp);
   const outerData = respData(outerResp);
 
   if (outerSW !== SW.OK) {
@@ -322,15 +353,25 @@ async function selectApplet(card: CardConn): Promise<void> {
   ]);
   const resp = await transmit(card, cmd);
   if (swCode(resp) !== SW.OK)
-    throw new Error(`SELECT failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `SELECT failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
 }
 
 async function initSecureChannel(card: CardConn): Promise<SecureChannel> {
   const sc = new SecureChannel();
   const hostPubKey = sc.getHostPublicKey();
-  const resp = await apdu(card, INS.INIT_SECURE_CHANNEL, 0x00, 0x00, hostPubKey);
+  const resp = await apdu(
+    card,
+    INS.INIT_SECURE_CHANNEL,
+    0x00,
+    0x00,
+    hostPubKey
+  );
   if (swCode(resp) !== SW.OK)
-    throw new Error(`INIT_SECURE_CHANNEL failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `INIT_SECURE_CHANNEL failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
   sc.processHandshakeResponse(respData(resp));
   return sc;
 }
@@ -347,7 +388,9 @@ interface CardStatus {
 async function getStatus(card: CardConn): Promise<CardStatus> {
   const resp = await apdu(card, INS.GET_STATUS, 0x00, 0x00);
   if (swCode(resp) !== SW.OK)
-    throw new Error(`GET_STATUS failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `GET_STATUS failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
   const d = respData(resp);
   return {
     setupDone: d[10] === 0x01,
@@ -359,7 +402,11 @@ async function getStatus(card: CardConn): Promise<CardStatus> {
   };
 }
 
-async function setupCard(card: CardConn, sc: SecureChannel, pin: Buffer): Promise<void> {
+async function setupCard(
+  card: CardConn,
+  sc: SecureChannel,
+  pin: Buffer
+): Promise<void> {
   const payload = Buffer.concat([
     Buffer.from([pin.length]),
     pin,
@@ -371,31 +418,53 @@ async function setupCard(card: CardConn, sc: SecureChannel, pin: Buffer): Promis
     throw new Error(`SETUP failed: ${swCode(resp).toString(16).toUpperCase()}`);
 }
 
-async function verifyPinRaw(card: CardConn, sc: SecureChannel, pin: Buffer): Promise<Buffer> {
+async function verifyPinRaw(
+  card: CardConn,
+  sc: SecureChannel,
+  pin: Buffer
+): Promise<Buffer> {
   return scApdu(card, sc, INS.VERIFY_PIN, 0x00, 0x00, pin);
 }
 
-async function verifyPin(card: CardConn, sc: SecureChannel, pin: Buffer): Promise<void> {
+async function verifyPin(
+  card: CardConn,
+  sc: SecureChannel,
+  pin: Buffer
+): Promise<void> {
   const resp = await verifyPinRaw(card, sc, pin);
   if (swCode(resp) !== SW.OK)
-    throw new Error(`VERIFY_PIN failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `VERIFY_PIN failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
 }
 
-async function importSeed(card: CardConn, sc: SecureChannel, seed64: Buffer): Promise<Buffer> {
+async function importSeed(
+  card: CardConn,
+  sc: SecureChannel,
+  seed64: Buffer
+): Promise<Buffer> {
   if (seed64.length !== 64) throw new Error('Seed must be 64 bytes');
   const resp = await scApdu(card, sc, INS.IMPORT_SEED, 0x00, 0x00, seed64);
   if (swCode(resp) !== SW.OK)
-    throw new Error(`IMPORT_SEED failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `IMPORT_SEED failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
   return respData(resp);
 }
 
-async function getPublicKey(card: CardConn, sc: SecureChannel, path: number[]): Promise<Buffer> {
+async function getPublicKey(
+  card: CardConn,
+  sc: SecureChannel,
+  path: number[]
+): Promise<Buffer> {
   const buf = Buffer.alloc(1 + path.length * 4);
   buf[0] = path.length;
   for (let i = 0; i < path.length; i++) buf.writeUInt32BE(path[i], 1 + i * 4);
   const resp = await scApdu(card, sc, INS.GET_PUBLIC_KEY, 0x00, 0x00, buf);
   if (swCode(resp) !== SW.OK)
-    throw new Error(`GET_PUBLIC_KEY failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `GET_PUBLIC_KEY failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
   return respData(resp);
 }
 
@@ -422,25 +491,61 @@ async function signTx(
   let resp: Buffer;
 
   if (chunks.length === 0) {
-    resp = await scApdu(card, sc, INS.SIGN_TX, P1.FIRST_LAST, 0x00, Buffer.concat([header, firstMsg]));
+    resp = await scApdu(
+      card,
+      sc,
+      INS.SIGN_TX,
+      P1.FIRST_LAST,
+      0x00,
+      Buffer.concat([header, firstMsg])
+    );
     if (swCode(resp) !== SW.OK)
-      throw new Error(`SIGN_TX failed: ${swCode(resp).toString(16).toUpperCase()}`);
+      throw new Error(
+        `SIGN_TX failed: ${swCode(resp).toString(16).toUpperCase()}`
+      );
     return respData(resp);
   }
 
-  resp = await scApdu(card, sc, INS.SIGN_TX, P1.FIRST, 0x00, Buffer.concat([header, firstMsg]));
+  resp = await scApdu(
+    card,
+    sc,
+    INS.SIGN_TX,
+    P1.FIRST,
+    0x00,
+    Buffer.concat([header, firstMsg])
+  );
   if (swCode(resp) !== SW.OK)
-    throw new Error(`SIGN_TX first chunk failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `SIGN_TX first chunk failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
 
   for (let i = 0; i < chunks.length - 1; i++) {
-    resp = await scApdu(card, sc, INS.SIGN_TX, P1.CONTINUATION, 0x00, chunks[i]);
+    resp = await scApdu(
+      card,
+      sc,
+      INS.SIGN_TX,
+      P1.CONTINUATION,
+      0x00,
+      chunks[i]
+    );
     if (swCode(resp) !== SW.OK)
-      throw new Error(`SIGN_TX continuation failed: ${swCode(resp).toString(16).toUpperCase()}`);
+      throw new Error(
+        `SIGN_TX continuation failed: ${swCode(resp).toString(16).toUpperCase()}`
+      );
   }
 
-  resp = await scApdu(card, sc, INS.SIGN_TX, P1.LAST, 0x00, chunks[chunks.length - 1]);
+  resp = await scApdu(
+    card,
+    sc,
+    INS.SIGN_TX,
+    P1.LAST,
+    0x00,
+    chunks[chunks.length - 1]
+  );
   if (swCode(resp) !== SW.OK)
-    throw new Error(`SIGN_TX last chunk failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `SIGN_TX last chunk failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
   return respData(resp);
 }
 
@@ -467,7 +572,9 @@ async function changePin(
 ): Promise<void> {
   const resp = await changePinRaw(card, sc, oldPin, newPin);
   if (swCode(resp) !== SW.OK)
-    throw new Error(`CHANGE_PIN failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `CHANGE_PIN failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
 }
 
 async function unblockPin(
@@ -484,13 +591,17 @@ async function unblockPin(
   ]);
   const resp = await scApdu(card, sc, INS.UNBLOCK_PIN, 0x00, 0x00, payload);
   if (swCode(resp) !== SW.OK)
-    throw new Error(`UNBLOCK_PIN failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `UNBLOCK_PIN failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
 }
 
 async function getLabel(card: CardConn): Promise<string> {
   const resp = await apdu(card, INS.CARD_LABEL, 0x00, 0x00);
   if (swCode(resp) !== SW.OK)
-    throw new Error(`GET_LABEL failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `GET_LABEL failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
   const d = respData(resp);
   if (d.length === 0) return '';
   const labelLen = d[0];
@@ -498,27 +609,42 @@ async function getLabel(card: CardConn): Promise<string> {
   return d.subarray(1, 1 + labelLen).toString('utf8');
 }
 
-async function setLabel(card: CardConn, sc: SecureChannel, label: string): Promise<void> {
+async function setLabel(
+  card: CardConn,
+  sc: SecureChannel,
+  label: string
+): Promise<void> {
   const labelBuf = Buffer.from(label, 'utf8');
   const payload = Buffer.concat([Buffer.from([labelBuf.length]), labelBuf]);
   const resp = await scApdu(card, sc, INS.CARD_LABEL, 0x01, 0x00, payload);
   if (swCode(resp) !== SW.OK)
-    throw new Error(`SET_LABEL failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `SET_LABEL failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
 }
 
 async function resetSeed(card: CardConn, sc: SecureChannel): Promise<void> {
   const resp = await scApdu(card, sc, INS.RESET_SEED, 0x00, 0x00);
   if (swCode(resp) !== SW.OK)
-    throw new Error(`RESET_SEED failed: ${swCode(resp).toString(16).toUpperCase()}`);
+    throw new Error(
+      `RESET_SEED failed: ${swCode(resp).toString(16).toUpperCase()}`
+    );
 }
 
-async function resetToFactory(card: CardConn, sc: SecureChannel): Promise<Buffer> {
+async function resetToFactory(
+  card: CardConn,
+  sc: SecureChannel
+): Promise<Buffer> {
   return scApdu(card, sc, INS.RESET_TO_FACTORY, 0x00, 0x00);
 }
 
 // ── Ed25519 verification helper ──────────────────────────────────────────────
 
-function verifyEd25519(pubkey: Buffer, message: Buffer, signature: Buffer): boolean {
+function verifyEd25519(
+  pubkey: Buffer,
+  message: Buffer,
+  signature: Buffer
+): boolean {
   const keyObj = crypto.createPublicKey({
     key: Buffer.concat([
       // Ed25519 SPKI DER prefix (12 bytes) + 32-byte key
@@ -621,68 +747,91 @@ async function main(): Promise<void> {
     assertEqual(status.isSeeded, false, 'isSeeded');
   });
 
-  await runTest('setup: second call throws SETUP_ALREADY_DONE (0x9C03)', async () => {
-    const payload = Buffer.concat([
-      Buffer.from([pin.length]),
-      pin,
-      Buffer.from([DEFAULT_PUK.length]),
-      DEFAULT_PUK,
-    ]);
-    const resp = await scApdu(card, sc, INS.SETUP, 0x00, 0x00, payload);
-    assertEqual(swCode(resp), SW.SETUP_ALREADY_DONE, 'SW');
-  });
-
-  await runTest('verifyPin: each wrong attempt returns correct SW and triesRemaining', async () => {
-    const wrongPin = Buffer.from('9999');
-    const maxTries = (await getStatus(card)).pinTriesMax;
-
-    // Use up to maxTries - 2 wrong attempts so we don't block the card
-    // (leave at least 2 tries: one for the blocking test, one for correct PIN)
-    const wrongAttempts = Math.min(3, maxTries - 2);
-
-    for (let i = 0; i < wrongAttempts; i++) {
-      const resp = await verifyPinRaw(card, sc, wrongPin);
-      const code = swCode(resp);
-      const expectedRemaining = maxTries - (i + 1);
-      const expectedSW = 0x63c0 | expectedRemaining;
-      assertEqual(code, expectedSW, `attempt ${i + 1} SW`);
+  await runTest(
+    'setup: second call throws SETUP_ALREADY_DONE (0x9C03)',
+    async () => {
+      const payload = Buffer.concat([
+        Buffer.from([pin.length]),
+        pin,
+        Buffer.from([DEFAULT_PUK.length]),
+        DEFAULT_PUK,
+      ]);
+      const resp = await scApdu(card, sc, INS.SETUP, 0x00, 0x00, payload);
+      assertEqual(swCode(resp), SW.SETUP_ALREADY_DONE, 'SW');
     }
-  });
+  );
 
-  await runTest('verifyPin: correct PIN resets tries and succeeds', async () => {
-    await verifyPin(card, sc, pin);
-    const status = await getStatus(card);
-    assertEqual(status.pinTriesLeft, status.pinTriesMax, 'pinTriesLeft should be restored');
-  });
+  await runTest(
+    'verifyPin: each wrong attempt returns correct SW and triesRemaining',
+    async () => {
+      const wrongPin = Buffer.from('9999');
+      const maxTries = (await getStatus(card)).pinTriesMax;
 
-  await runTest('verifyPin: last wrong attempt blocks card (0x9C0C)', async () => {
-    // Drain all remaining tries with wrong PIN.
-    const wrongPin = Buffer.from('9999');
-    const status = await getStatus(card);
-    const remaining = status.pinTriesLeft;
+      // Use up to maxTries - 2 wrong attempts so we don't block the card
+      // (leave at least 2 tries: one for the blocking test, one for correct PIN)
+      const wrongAttempts = Math.min(3, maxTries - 2);
 
-    for (let i = 0; i < remaining; i++) {
-      const resp = await verifyPinRaw(card, sc, wrongPin);
-      const code = swCode(resp);
-      const expectedSW = 0x63c0 | (remaining - (i + 1));
-      assertEqual(code, expectedSW, `drain attempt ${i + 1} SW`);
+      for (let i = 0; i < wrongAttempts; i++) {
+        const resp = await verifyPinRaw(card, sc, wrongPin);
+        const code = swCode(resp);
+        const expectedRemaining = maxTries - (i + 1);
+        const expectedSW = 0x63c0 | expectedRemaining;
+        assertEqual(code, expectedSW, `attempt ${i + 1} SW`);
+      }
     }
+  );
 
-    // Card is now blocked — next attempt must return IDENTITY_BLOCKED
-    const blockedResp = await verifyPinRaw(card, sc, wrongPin);
-    assertEqual(swCode(blockedResp), SW.IDENTITY_BLOCKED, 'blocked card SW');
-  });
+  await runTest(
+    'verifyPin: correct PIN resets tries and succeeds',
+    async () => {
+      await verifyPin(card, sc, pin);
+      const status = await getStatus(card);
+      assertEqual(
+        status.pinTriesLeft,
+        status.pinTriesMax,
+        'pinTriesLeft should be restored'
+      );
+    }
+  );
 
-  await runTest('unblockPin: PUK unblocks card and restores correct PIN', async () => {
-    await unblockPin(card, sc, DEFAULT_PUK, pin);
-    // Re-select applet to clear transient state, then establish fresh secure channel
-    await selectApplet(card);
-    sc = await initSecureChannel(card);
-    // Verify the new PIN works
-    await verifyPin(card, sc, pin);
-    const status = await getStatus(card);
-    assertEqual(status.pinTriesLeft, status.pinTriesMax, 'pinTriesLeft should be restored');
-  });
+  await runTest(
+    'verifyPin: last wrong attempt blocks card (0x9C0C)',
+    async () => {
+      // Drain all remaining tries with wrong PIN.
+      const wrongPin = Buffer.from('9999');
+      const status = await getStatus(card);
+      const remaining = status.pinTriesLeft;
+
+      for (let i = 0; i < remaining; i++) {
+        const resp = await verifyPinRaw(card, sc, wrongPin);
+        const code = swCode(resp);
+        const expectedSW = 0x63c0 | (remaining - (i + 1));
+        assertEqual(code, expectedSW, `drain attempt ${i + 1} SW`);
+      }
+
+      // Card is now blocked — next attempt must return IDENTITY_BLOCKED
+      const blockedResp = await verifyPinRaw(card, sc, wrongPin);
+      assertEqual(swCode(blockedResp), SW.IDENTITY_BLOCKED, 'blocked card SW');
+    }
+  );
+
+  await runTest(
+    'unblockPin: PUK unblocks card and restores correct PIN',
+    async () => {
+      await unblockPin(card, sc, DEFAULT_PUK, pin);
+      // Re-select applet to clear transient state, then establish fresh secure channel
+      //await selectApplet(card);
+      sc = await initSecureChannel(card);
+      // Verify the new PIN works
+      await verifyPin(card, sc, pin);
+      const status = await getStatus(card);
+      assertEqual(
+        status.pinTriesLeft,
+        status.pinTriesMax,
+        'pinTriesLeft should be restored'
+      );
+    }
+  );
 
   await runTest('importSeed: returns 32-byte Ed25519 public key', async () => {
     const pubkey = await importSeed(card, sc, seed);
@@ -696,25 +845,43 @@ async function main(): Promise<void> {
     assertEqual(status.setupDone, true, 'setupDone');
   });
 
-  await runTest('getPublicKey: returns same 32-byte key as importSeed()', async () => {
-    const pubkey = await getPublicKey(card, sc, SOLANA_PATH);
-    assertEqual(pubkey.length, 32, 'pubkey length');
-    assert(pubkey.equals(savedPubkey!), 'pubkey should match importSeed result');
-  });
+  await runTest(
+    'getPublicKey: returns same 32-byte key as importSeed()',
+    async () => {
+      const pubkey = await getPublicKey(card, sc, SOLANA_PATH);
+      assertEqual(pubkey.length, 32, 'pubkey length');
+      assert(
+        pubkey.equals(savedPubkey!),
+        'pubkey should match importSeed result'
+      );
+    }
+  );
 
-  await runTest('signTransaction: returns valid 64-byte Ed25519 signature', async () => {
-    const message = crypto.randomBytes(64);
-    const sig = await signTx(card, sc, SOLANA_PATH, message);
-    assertEqual(sig.length, 64, 'signature length');
-    assert(verifyEd25519(savedPubkey!, message, sig), 'signature should verify');
-  });
+  await runTest(
+    'signTransaction: returns valid 64-byte Ed25519 signature',
+    async () => {
+      const message = crypto.randomBytes(64);
+      const sig = await signTx(card, sc, SOLANA_PATH, message);
+      assertEqual(sig.length, 64, 'signature length');
+      assert(
+        verifyEd25519(savedPubkey!, message, sig),
+        'signature should verify'
+      );
+    }
+  );
 
-  await runTest('signTransaction: large message (multi-chunk) produces valid signature', async () => {
-    const message = crypto.randomBytes(500);
-    const sig = await signTx(card, sc, SOLANA_PATH, message);
-    assertEqual(sig.length, 64, 'signature length');
-    assert(verifyEd25519(savedPubkey!, message, sig), 'signature should verify');
-  });
+  await runTest(
+    'signTransaction: large message (multi-chunk) produces valid signature',
+    async () => {
+      const message = crypto.randomBytes(500);
+      const sig = await signTx(card, sc, SOLANA_PATH, message);
+      assertEqual(sig.length, 64, 'signature length');
+      assert(
+        verifyEd25519(savedPubkey!, message, sig),
+        'signature should verify'
+      );
+    }
+  );
 
   await runTest('getLabel: returns empty string on fresh card', async () => {
     const label = await getLabel(card);
@@ -747,42 +914,56 @@ async function main(): Promise<void> {
     await verifyPin(card, sc, pin);
   });
 
-  await runTest('resetSeed: clears seed; getStatus shows isSeeded=false', async () => {
-    await resetSeed(card, sc);
-    const status = await getStatus(card);
-    assertEqual(status.isSeeded, false, 'isSeeded');
-    assertEqual(status.setupDone, true, 'setupDone should still be true');
-  });
+  await runTest(
+    'resetSeed: clears seed; getStatus shows isSeeded=false',
+    async () => {
+      await resetSeed(card, sc);
+      const status = await getStatus(card);
+      assertEqual(status.isSeeded, false, 'isSeeded');
+      assertEqual(status.setupDone, true, 'setupDone should still be true');
+    }
+  );
 
-  await runTest('re-importSeed: produces the same public key as the first import', async () => {
-    // Re-select applet to clear transient state, then establish fresh secure channel
-    await selectApplet(card);
-    sc = await initSecureChannel(card);
-    await verifyPin(card, sc, pin);
-    const pubkey = await importSeed(card, sc, seed);
-    assertEqual(pubkey.length, 32, 'pubkey length');
-    assert(pubkey.equals(savedPubkey!), 'pubkey should match first importSeed result');
-  });
+  await runTest(
+    're-importSeed: produces the same public key as the first import',
+    async () => {
+      // Re-select applet to clear transient state, then establish fresh secure channel
+      //await selectApplet(card);
+      sc = await initSecureChannel(card);
+      await verifyPin(card, sc, pin);
+      const pubkey = await importSeed(card, sc, seed);
+      assertEqual(pubkey.length, 32, 'pubkey length');
+      assert(
+        pubkey.equals(savedPubkey!),
+        'pubkey should match first importSeed result'
+      );
+    }
+  );
 
-  await runTest('resetToFactory: wipes card; status shows setup not done', async () => {
-    const resp = await resetToFactory(card, sc);
-    assertEqual(swCode(resp), SW.RESET_TO_FACTORY, 'SW should be 0xFF00');
+  await runTest(
+    'resetToFactory: wipes card; status shows setup not done',
+    async () => {
+      const resp = await resetToFactory(card, sc);
+      assertEqual(swCode(resp), SW.RESET_TO_FACTORY, 'SW should be 0xFF00');
 
-    // Re-establish secure channel after factory reset
-    await selectApplet(card);
-    sc = await initSecureChannel(card);
+      // Re-establish secure channel after factory reset
+      await selectApplet(card);
+      sc = await initSecureChannel(card);
 
-    const status = await getStatus(card);
-    assertEqual(status.setupDone, false, 'setupDone');
-    assertEqual(status.isSeeded, false, 'isSeeded');
-  });
+      const status = await getStatus(card);
+      assertEqual(status.setupDone, false, 'setupDone');
+      assertEqual(status.isSeeded, false, 'isSeeded');
+    }
+  );
 
   // ── Summary ────────────────────────────────────────────────────────────────
 
   console.log('\n── Results ──');
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
-  console.log(`  ${passed} passed, ${failed} failed, ${results.length} total\n`);
+  console.log(
+    `  ${passed} passed, ${failed} failed, ${results.length} total\n`
+  );
 
   if (failed > 0) {
     console.log('Failures:');

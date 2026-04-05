@@ -221,7 +221,10 @@ public class Ed25519Signer {
      * Must be called from TapiocaApplet.select().
      */
     public void onSelect() {
-        if (keyLoaded) curve.updateAfterReset();
+        // Always refresh curve parameters — they are TRANSIENT_RESET and get
+        // zeroed on power cycle. Without this, importSeed after factory reset
+        // would perform EC math against zeroed moduli (causing 0x9C80).
+        curve.updateAfterReset();
     }
 
     /**

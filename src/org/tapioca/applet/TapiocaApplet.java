@@ -169,10 +169,12 @@ public class TapiocaApplet extends Applet {
             pin.reset();
             puk.reset();
         }
-        // Only call onSelect (which calls curve.updateAfterReset) if a key is actually
-        // loaded. After factory reset isSeeded=false, avoiding a call into partially
-        // initialized EC state.
-        if (signerInitialized && isSeeded) signer.onSelect();
+        // Always refresh CLEAR_ON_RESET curve parameters (pBN, rBN) when the signer
+        // has been initialized. A card reset (power cycle, NFC field loss) zeros these
+        // transient arrays, and signer.setKey()'s EC math will AIOOBE on zeroed moduli.
+        // This must run even when isSeeded/keyLoaded is false (e.g. after factory reset)
+        // because the next importSeed call will need valid curve parameters.
+        if (signerInitialized) signer.onSelect();
         return true;
     }
 
