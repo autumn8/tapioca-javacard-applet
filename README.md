@@ -152,15 +152,33 @@ All suites target the first PC/SC reader found. Connect the card before running.
 
 ---
 
-### CLI End to End Test
+### CLI End to End Tests
 
-The `test/e2e/` directory contains a TypeScript tool for manual card interaction via a PC/SC reader. Requires Node.js:
+The `test/e2e/` directory contains TypeScript tools for real-card interaction via a PC/SC reader. Requires Node.js 18+ and `pcsclite`:
 
 ```sh
-cd test/e2e
-npm install
-npm start
+brew install pcsc-lite   # macOS
+cd test/e2e && npm install
 ```
+
+**Provision a fresh card** — builds the applet, reinstalls it, sets up PIN/PUK, imports a generated (or provided) seed, and writes `card-info.json`:
+
+```sh
+npm run setup-fresh-card                          # generate new 24-word mnemonic
+npm run setup-fresh-card -- --pin 5678 --puk 9999
+npm run setup-fresh-card -- "word1 word2 ..." --pin 5678
+```
+
+`card-info.json` (gitignored) contains the mnemonic, derived Solana address, PIN, and PUK in plaintext — devnet/testing use only.
+
+**Sign a real devnet transaction** — airdrops SOL if needed, builds a transfer, streams it to the card for signing, and broadcasts it:
+
+```sh
+npm start "<12-or-24-word bip39 mnemonic>"
+npm start "<mnemonic>" -- --pin 5678
+```
+
+See [test/e2e/README.md](test/e2e/README.md) for full details.
 
 ---
 

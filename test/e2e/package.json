@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "start": "ts-node index.ts",
-    "build": "tsc --noEmit"
+    "build": "tsc --noEmit",
+    "setup-fresh-card": "bash -c 'cd ../.. && ant && java -jar gp.jar --uninstall TapiocaApplet-0.1.cap && java -jar gp.jar --install TapiocaApplet-0.1.cap && cd test/e2e && ts-node setup-fresh-card.ts \"$@\"' setup-fresh-card"
   },
   "dependencies": {
     "@solana/web3.js": "^1.95.5",
