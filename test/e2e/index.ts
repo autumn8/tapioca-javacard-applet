@@ -31,6 +31,7 @@ import {
   Keypair,
 } from '@solana/web3.js';
 import * as bip39 from 'bip39';
+import { SecureChannel } from './secure-channel';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -233,23 +234,25 @@ async function setupCard(card: CardConn, pin: Buffer): Promise<void> {
 
 // ── Card: VERIFY_PIN ──────────────────────────────────────────────────────────
 
-async function verifyPin(card: CardConn, pin: Buffer): Promise<void> {
-  const resp = await apdu(card, INS.VERIFY_PIN, 0x00, 0x00, pin);
+async function verifyPin(sc: SecureChannel, card: CardConn, pin: Buffer): Promise<void> {
+  const resp = await sc.send((ins, p1, p2, payload) => apdu(card, ins, p1, p2, payload),
+    INS.VERIFY_PIN, 0x00, 0x00, pin);
   if (sw(resp) !== SW.OK) {
-    const tries = sw(resp) & 0x0f;
-    throw new Error(`PIN incorrect — ${tries} tries remaining`);
+    const s = sw(resp);
+    if ((s & 0xfff0) === 0x63c0)
+      throw new Error(`PIN incorrect — ${s & 0x0f} tries remaining`);
+    throw new Error(`VERIFY_PIN failed: ${s.toString(16).toUpperCase()}`);
   }
 }
 
 // ── Card: IMPORT_SEED ─────────────────────────────────────────────────────────
 
-async function importSeed(card: CardConn, seed64: Buffer): Promise<Buffer> {
+async function importSeed(sc: SecureChannel, card: CardConn, seed64: Buffer): Promise<Buffer> {
   if (seed64.length !== 64) throw new Error('Seed must be 64 bytes');
-  const resp = await apdu(card, INS.IMPORT_SEED, 0x00, 0x00, seed64);
+  const resp = await sc.send((ins, p1, p2, payload) => apdu(card, ins, p1, p2, payload),
+    INS.IMPORT_SEED, 0x00, 0x00, seed64);
   if (sw(resp) !== SW.OK)
-    throw new Error(
-      `IMPORT_SEED failed: ${sw(resp).toString(16).toUpperCase()}`
-    );
+    throw new Error(`IMPORT_SEED failed: ${sw(resp).toString(16).toUpperCase()}`);
   return respData(resp); // 32-byte pubkey at m/44'/501'/0'
 }
 
@@ -268,79 +271,62 @@ async function getPublicKey(card: CardConn, path: number[]): Promise<Buffer> {
 }
 
 // ── Card: SIGN_TX ─────────────────────────────────────────────────────────────
+// Always signs at m/44'/501'/0' — no path bytes in the APDU.
+// Response: 64-byte Ed25519 signature + 32-byte public key (96 bytes total).
 
 async function signTx(
   card: CardConn,
-  path: number[],
   message: Buffer
-): Promise<Buffer> {
-  // Build path header: [depth (1)] [idx_0 (4)] ... [idx_n (4)]
-  const header = Buffer.alloc(1 + path.length * 4);
-  header[0] = path.length;
-  for (let i = 0; i < path.length; i++)
-    header.writeUInt32BE(path[i], 1 + i * 4);
-
-  const firstMsgCap = CHUNK_SIZE - header.length;
-  const firstMsg = message.subarray(0, firstMsgCap);
-  const rest = message.subarray(firstMsgCap);
-
-  // Slice rest into CHUNK_SIZE pieces
+): Promise<{ sig: Buffer; pubkey: Buffer }> {
+  // Slice message into CHUNK_SIZE pieces
   const chunks: Buffer[] = [];
-  for (let off = 0; off < rest.length; off += CHUNK_SIZE) {
-    chunks.push(rest.subarray(off, off + CHUNK_SIZE));
+  for (let off = 0; off < message.length; off += CHUNK_SIZE) {
+    chunks.push(message.subarray(off, off + CHUNK_SIZE));
   }
+  if (chunks.length === 0) chunks.push(Buffer.alloc(0));
 
   let resp: Buffer;
 
-  if (chunks.length === 0) {
+  if (chunks.length === 1) {
     // Entire message fits in one APDU
+    resp = await apdu(card, INS.SIGN_TX, P1.FIRST_LAST, 0x00, chunks[0]);
+    if (sw(resp) !== SW.OK)
+      throw new Error(`SIGN_TX failed: ${sw(resp).toString(16).toUpperCase()}`);
+  } else {
+    // First chunk
+    resp = await apdu(card, INS.SIGN_TX, P1.FIRST, 0x00, chunks[0]);
+    if (sw(resp) !== SW.OK)
+      throw new Error(
+        `SIGN_TX first chunk failed: ${sw(resp).toString(16).toUpperCase()}`
+      );
+
+    // Middle chunks
+    for (let i = 1; i < chunks.length - 1; i++) {
+      resp = await apdu(card, INS.SIGN_TX, P1.CONTINUATION, 0x00, chunks[i]);
+      if (sw(resp) !== SW.OK)
+        throw new Error(
+          `SIGN_TX continuation failed: ${sw(resp).toString(16).toUpperCase()}`
+        );
+    }
+
+    // Last chunk — returns 64-byte signature + 32-byte public key
     resp = await apdu(
       card,
       INS.SIGN_TX,
-      P1.FIRST_LAST,
+      P1.LAST,
       0x00,
-      Buffer.concat([header, firstMsg])
+      chunks[chunks.length - 1]
     );
-    if (sw(resp) !== SW.OK)
-      throw new Error(`SIGN_TX failed: ${sw(resp).toString(16).toUpperCase()}`);
-    return respData(resp);
-  }
-
-  // First chunk
-  resp = await apdu(
-    card,
-    INS.SIGN_TX,
-    P1.FIRST,
-    0x00,
-    Buffer.concat([header, firstMsg])
-  );
-  if (sw(resp) !== SW.OK)
-    throw new Error(
-      `SIGN_TX first chunk failed: ${sw(resp).toString(16).toUpperCase()}`
-    );
-
-  // Middle chunks
-  for (let i = 0; i < chunks.length - 1; i++) {
-    resp = await apdu(card, INS.SIGN_TX, P1.CONTINUATION, 0x00, chunks[i]);
     if (sw(resp) !== SW.OK)
       throw new Error(
-        `SIGN_TX continuation failed: ${sw(resp).toString(16).toUpperCase()}`
+        `SIGN_TX last chunk failed: ${sw(resp).toString(16).toUpperCase()}`
       );
   }
 
-  // Last chunk — returns 64-byte signature
-  resp = await apdu(
-    card,
-    INS.SIGN_TX,
-    P1.LAST,
-    0x00,
-    chunks[chunks.length - 1]
-  );
-  if (sw(resp) !== SW.OK)
-    throw new Error(
-      `SIGN_TX last chunk failed: ${sw(resp).toString(16).toUpperCase()}`
-    );
-  return respData(resp);
+  const data = respData(resp);
+  if (data.length !== 96)
+    throw new Error(`SIGN_TX: expected 96-byte response, got ${data.length}`);
+  return { sig: data.subarray(0, 64), pubkey: data.subarray(64, 96) };
 }
 
 // ── Logging ───────────────────────────────────────────────────────────────────
@@ -411,7 +397,11 @@ async function main(): Promise<void> {
     log('  SETUP complete.');
   }
 
-  await verifyPin(card, pin);
+  const sc = new SecureChannel();
+  await sc.handshake((ins, p1, p2, payload) => apdu(card, ins, p1, p2, payload));
+  log('  Secure channel established.');
+
+  await verifyPin(sc, card, pin);
   log('  PIN verified.');
 
   // ── 4. Import seed ────────────────────────────────────────────────────────
@@ -422,7 +412,7 @@ async function main(): Promise<void> {
   if (!statusAfterPin.isSeeded) {
     log('  No seed on card — importing (~5–8s)...');
     const t0 = Date.now();
-    pubkeyBytes = await importSeed(card, seed);
+    pubkeyBytes = await importSeed(sc, card, seed);
     log(`  Seed imported in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   } else {
     log('  Card already seeded — reading public key...');
@@ -490,9 +480,9 @@ async function main(): Promise<void> {
 
   // ── 8. Sign on card ───────────────────────────────────────────────────────
   logStep(8, 'Sign on card');
-  log('  Signing (key setup ~2.7s + EC sign ~1.4s)...');
+  log('  Signing (~1.4s)...');
   const t1 = Date.now();
-  const sigBytes = await signTx(card, SOLANA_PATH, msgBytes);
+  const { sig: sigBytes } = await signTx(card, msgBytes);
   const elapsed = ((Date.now() - t1) / 1000).toFixed(1);
   log(`  Done in ${elapsed}s`);
   log(`  Signature: ${sigBytes.toString('hex').slice(0, 32)}...`);

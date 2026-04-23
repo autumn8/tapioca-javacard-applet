@@ -256,7 +256,9 @@ All indexes must be hardened: bit 31 set (`0x80000000 | n`). Returns `0x9C0F` if
 
 **Response:** 32-byte Ed25519 public key at the requested path.
 
-**Timing:** ~2,700 ms (full SLIP-0010 derivation from master key).
+**Timing:** ~2,700 ms for the default path (single derivation); ~5,400 ms for any other path (one derivation for the requested path + one to restore the default signing key used by `INS_SIGN_TX`).
+
+**Side effect:** After returning the requested pubkey, the card re-derives and reloads the default `m/44'/501'/0'` signing key so that `INS_SIGN_TX` continues to sign at the standard Solana path. This is skipped when the requested path already is the default. 
 
 **Standard Solana path** `m/44'/501'/0'`:
 
@@ -281,49 +283,51 @@ B0 6D 00 00 0D  03  80 00 00 2C  80 00 01 F5  80 00 00 00  00
 
 Signs a Solana transaction message using Ed25519. Supports multi-chunk streaming for messages up to 1,200 bytes.
 
+**Signing key:** Always `m/44'/501'/0'` — the key derived and loaded at `INS_IMPORT_SEED`. No derivation path is sent in the APDU, and re-derivation is skipped on each sign (saves ~2,700 ms per signature).
+
 **P1 flags:**
 
-| P1     | Meaning                                  |
-| ------ | ---------------------------------------- |
-| `0x81` | Single-chunk (first + last)              |
-| `0x01` | First chunk of a multi-chunk message     |
-| `0x00` | Continuation chunk                       |
-| `0x80` | Last chunk — response contains signature |
+| P1     | Meaning                                              |
+| ------ | ---------------------------------------------------- |
+| `0x81` | Single-chunk (first + last)                          |
+| `0x01` | First chunk — resets the message accumulator         |
+| `0x00` | Continuation chunk                                   |
+| `0x80` | Last chunk — response contains signature + pubkey    |
 
-**First chunk data (P1 = `0x01` or `0x81`):**
-
-```
-[depth (1)] [index_0 (4 BE)] ... [index_{depth-1} (4 BE)] [message bytes...]
-```
-
-**Continuation / last chunk data (P1 = `0x00` or `0x80`):**
+**Chunk data (all P1 values):**
 
 ```
 [message bytes...]
 ```
 
-**Response** (last chunk only): 64-byte Ed25519 signature.
+**Response** (last chunk only): 96 bytes.
 
-**Timing:** ~4,200 ms total (derivation ~2,700 ms on first chunk + signing ~1,440 ms on last chunk).
+```
+[signature (64 bytes)] [public key (32 bytes)]
+```
+
+The public key is the 32-byte Ed25519 pubkey at `m/44'/501'/0'` — i.e. the key that signed the message. Returning it inline lets the host verify the signature without a separate `INS_GET_PUBLIC_KEY` round-trip.
+
+**Timing:** ~1,440 ms total (signing only — derivation happens once at `INS_IMPORT_SEED`).
 
 **What to sign:** The serialized Solana transaction _message_ — not the full transaction. This is the output of `transaction.serializeMessage()` in `@solana/web3.js`, or equivalently the bytes that get hashed for signing in the Solana protocol.
 
 **Maximum message size:** 1,200 bytes (covers the Solana network limit of ~1,168 bytes).
 
-**Single-chunk example** (100-byte message at `m/44'/501'/0'`):
+**Single-chunk example** (100-byte message):
 
 ```
-→ B0 6F 81 00 [Lc]  03 80 00 00 2C 80 00 01 F5 80 00 00 00 [100 message bytes]  00
-← [64-byte signature]  90 00
+→ B0 6F 81 00 [Lc]  [100 message bytes]  00
+← [64-byte signature] [32-byte pubkey]  90 00
 ```
 
 **Multi-chunk example** (500-byte message):
 
 ```
-→ B0 6F 01 00 [Lc]  03 80 00 00 2C 80 00 01 F5 80 00 00 00 [first message bytes]
+→ B0 6F 01 00 [Lc]  [first message bytes]
 → B0 6F 00 00 [Lc]  [next message bytes]
 → B0 6F 80 00 [Lc]  [final message bytes]
-← [64-byte signature]  90 00
+← [64-byte signature] [32-byte pubkey]  90 00
 ```
 
 If the NFC session is interrupted mid-stream, the partial signing state is cleared on deselect. Restart from the first chunk on the next session.
@@ -567,10 +571,11 @@ Complete wire-level sequence for signing a Solana transaction:
 5.  INS_VERIFY_PIN (wrapped in secure channel)
 6.  INS_IMPORT_SEED (wrapped, first session only) → 64-byte BIP-39 seed
 7.  Build Solana transaction, serialize the message bytes
-8.  INS_SIGN_TX (wrapped or plain) with path m/44'/501'/0' and message bytes
-    — single-chunk if message ≤ ~240 bytes (accounting for path prefix)
+8.  INS_SIGN_TX (wrapped or plain) with message bytes
+    (always signs at m/44'/501'/0' — no path sent in the APDU)
+    — single-chunk if message ≤ 255 bytes
     — multi-chunk otherwise
-9.  Receive 64-byte Ed25519 signature
+9.  Receive 96-byte response: [64-byte signature] [32-byte pubkey]
 10. Attach signature to transaction and broadcast
 ```
 

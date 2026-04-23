@@ -207,22 +207,24 @@ See [test/e2e/README.md](test/e2e/README.md) for full details.
 
 ### INS_SIGN_TX chunking
 
-Solana messages can be up to ~1168 bytes. The signing command uses P1 flags to stream them:
+`INS_SIGN_TX` always signs with the key derived at `m/44'/501'/0'` during `INS_IMPORT_SEED` — no derivation path is sent in the APDU. Solana messages can be up to ~1168 bytes; P1 flags stream them:
 
-| P1     | Meaning                                     |
-| ------ | ------------------------------------------- |
-| `0x01` | First chunk — data begins with path + depth |
-| `0x00` | Continuation chunk                          |
-| `0x80` | Last chunk — response is 64-byte signature  |
+| P1     | Meaning                                                          |
+| ------ | ---------------------------------------------------------------- |
+| `0x01` | First chunk — resets the accumulator; data is message bytes only |
+| `0x00` | Continuation chunk                                               |
+| `0x80` | Last chunk — response is signature + pubkey                      |
+| `0x81` | First AND last (single-chunk message)                            |
 
-First chunk data format:
+Chunk data format (all chunks):
 
 ```
-[depth (1)] [idx_0 (4)] ... [idx_n (4)] [message bytes ...]
+[message bytes ...]
 ```
 
-All path indexes must have bit 31 set (hardened). Standard Solana path: `m/44'/501'/0'`
-→ `[0x80000000 + 44][0x80000000 + 501][0x80000000 + 0]`.
+Response (last chunk only): 96 bytes — `[signature (64)] [public key (32)]`. The returned pubkey lets clients verify the signature without a separate `INS_GET_PUBLIC_KEY` call.
+
+Signing is fixed to the default Solana path; `INS_GET_PUBLIC_KEY` can still derive other paths for read-only use but the card always restores the default signing key afterward.
 
 ### Key status words
 

@@ -215,6 +215,17 @@ public class Ed25519Signer {
         if (keyLoaded) curve.updateAfterReset();
     }
 
+    /**
+     * Zero all key material. Called from TapiocaApplet.resetSeed() and resetToFactory().
+     */
+    public void clearKey() {
+        Util.arrayFillNonAtomic(ramArray,   (short) 0, (short) ramArray.length, (byte) 0x00);
+        privateKey.fromByteArray(ramArray, (short) 0, (short) 32);
+        Util.arrayFillNonAtomic(prefix,    (short) 0, (short) 32, (byte) 0x00);
+        Util.arrayFillNonAtomic(publicKey, (short) 0, (short) 32, (byte) 0x00);
+        keyLoaded = false;
+    }
+
     // ── Internal helpers (mirrored from JCEd25519) ────────────────────────────
 
     private void encodeEd25519(ECPoint pt, byte[] buffer, short offset) {

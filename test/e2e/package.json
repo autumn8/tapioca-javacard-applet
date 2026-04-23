@@ -5,11 +5,14 @@
   "scripts": {
     "start": "ts-node index.ts",
     "build": "tsc --noEmit",
-    "setup-fresh-card": "bash -c 'cd ../.. && ant && java -jar gp.jar --uninstall TapiocaApplet-0.1.cap && java -jar gp.jar --install TapiocaApplet-0.1.cap && cd test/e2e && ts-node setup-fresh-card.ts \"$@\"' setup-fresh-card"
+    "setup-fresh-card": "bash -c 'export JAVA_HOME=/opt/homebrew/opt/openjdk@11 && cd ../.. && ant && java -jar gp.jar --uninstall TapiocaApplet-0.1.cap && java -jar gp.jar --install TapiocaApplet-0.1.cap && cd test/e2e && ts-node setup-fresh-card.ts \"$@\"' setup-fresh-card",
+    "create-usdc-ata": "ts-node create-usdc-ata.ts"
   },
   "dependencies": {
+    "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.95.5",
     "bip39": "^3.1.0",
+    "ed25519-hd-key": "^1.3.0",
     "pcsclite": "^1.0.1"
   },
   "devDependencies": {
