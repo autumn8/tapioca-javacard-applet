@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as bip39 from 'bip39';
 import { PublicKey } from '@solana/web3.js';
+import { SecureChannel } from './secure-channel';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -202,21 +203,23 @@ async function setupCard(
     throw new Error(`SETUP failed: ${sw(resp).toString(16).toUpperCase()}`);
 }
 
-async function verifyPin(card: CardConn, pin: Buffer): Promise<void> {
-  const resp = await apdu(card, INS.VERIFY_PIN, 0x00, 0x00, pin);
+async function verifyPin(sc: SecureChannel, card: CardConn, pin: Buffer): Promise<void> {
+  const resp = await sc.send((ins, p1, p2, payload) => apdu(card, ins, p1, p2, payload),
+    INS.VERIFY_PIN, 0x00, 0x00, pin);
   if (sw(resp) !== SW.OK) {
-    const tries = sw(resp) & 0x0f;
-    throw new Error(`PIN incorrect — ${tries} tries remaining`);
+    const s = sw(resp);
+    if ((s & 0xfff0) === 0x63c0)
+      throw new Error(`PIN incorrect — ${s & 0x0f} tries remaining`);
+    throw new Error(`VERIFY_PIN failed: ${s.toString(16).toUpperCase()}`);
   }
 }
 
-async function importSeed(card: CardConn, seed64: Buffer): Promise<Buffer> {
+async function importSeed(sc: SecureChannel, card: CardConn, seed64: Buffer): Promise<Buffer> {
   if (seed64.length !== 64) throw new Error('Seed must be 64 bytes');
-  const resp = await apdu(card, INS.IMPORT_SEED, 0x00, 0x00, seed64);
+  const resp = await sc.send((ins, p1, p2, payload) => apdu(card, ins, p1, p2, payload),
+    INS.IMPORT_SEED, 0x00, 0x00, seed64);
   if (sw(resp) !== SW.OK)
-    throw new Error(
-      `IMPORT_SEED failed: ${sw(resp).toString(16).toUpperCase()}`
-    );
+    throw new Error(`IMPORT_SEED failed: ${sw(resp).toString(16).toUpperCase()}`);
   return respData(resp); // 32-byte pubkey at m/44'/501'/0'
 }
 
@@ -308,10 +311,15 @@ async function main(): Promise<void> {
     throw new Error('Card reported setup_done=false after SETUP — unexpected');
   log(`  Verified: setup_done=true  pin_tries_left=${statusAfterSetup.pinTriesLeft}/${statusAfterSetup.pinTriesMax}`);
 
+  // Establish secure channel (required for PIN and seed commands)
+  const sc = new SecureChannel();
+  await sc.handshake((ins, p1, p2, payload) => apdu(card, ins, p1, p2, payload));
+  log('  Secure channel established.');
+
   // ── 4. Verify PIN ─────────────────────────────────────────────────────────
   logStep(4, 'Verify PIN');
   const triesBefore = (await getStatus(card)).pinTriesLeft;
-  await verifyPin(card, pin);
+  await verifyPin(sc, card, pin);
   const triesAfter = (await getStatus(card)).pinTriesLeft;
   if (triesAfter !== triesBefore)
     throw new Error(`PIN verification consumed a try (${triesBefore} → ${triesAfter}) — PIN may be wrong`);
@@ -321,7 +329,7 @@ async function main(): Promise<void> {
   logStep(5, 'Import seed');
   log("  Importing seed (~5–8s)...");
   const t0 = Date.now();
-  const pubkeyBytes = await importSeed(card, seed);
+  const pubkeyBytes = await importSeed(sc, card, seed);
   log(`  Seed imported in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
   const address = new PublicKey(pubkeyBytes);

@@ -234,11 +234,27 @@ public class TapiocaApplet extends Applet {
         // All other commands require setup to have been completed
         if (!setupDone) ISOException.throwIt(SW_SETUP_NOT_DONE);
 
+        // Commands that transmit sensitive material (PIN, PUK, seed) over the wire
+        // must arrive inside an encrypted secure channel envelope.
+        if (requiresSecureChannel(ins) && !sc.isInitialized())
+            ISOException.throwIt(SW_SECURE_CHANNEL_REQUIRED);
+
         // Read incoming data once here so handlers don't need to call
         // setIncomingAndReceive() — this avoids a double-call when the
         // same handlers are dispatched from the secure channel path.
         apdu.setIncomingAndReceive();
         dispatchDecrypted(apdu, buf, ins);
+    }
+
+    /**
+     * Returns true for commands that transmit sensitive material in their APDU data
+     * and must therefore only be accepted inside an active secure channel.
+     */
+    private static boolean requiresSecureChannel(byte ins) {
+        return ins == INS_VERIFY_PIN
+            || ins == INS_CHANGE_PIN
+            || ins == INS_UNBLOCK_PIN
+            || ins == INS_IMPORT_SEED;
     }
 
     /**
@@ -429,6 +445,7 @@ public class TapiocaApplet extends Applet {
         Util.arrayFillNonAtomic(tmp,             (short) 0, (short) tmp.length,  (byte) 0x00);
         Util.arrayFillNonAtomic(masterKey,       (short) 0, (short) 32,          (byte) 0x00);
         Util.arrayFillNonAtomic(masterChainCode, (short) 0, (short) 32,          (byte) 0x00);
+        if (signerInitialized) signer.clearKey();
         Util.arrayFillNonAtomic(cardLabel,       (short) 0, LABEL_MAX_SIZE,      (byte) 0x00);
         labelLen = (byte) 0;
         txState.reset();
@@ -495,6 +512,7 @@ public class TapiocaApplet extends Applet {
 
         Util.arrayFillNonAtomic(masterKey,       (short) 0, (short) 32, (byte) 0x00);
         Util.arrayFillNonAtomic(masterChainCode, (short) 0, (short) 32, (byte) 0x00);
+        if (signerInitialized) signer.clearKey();
         isSeeded = false;
     }
 
@@ -509,6 +527,9 @@ public class TapiocaApplet extends Applet {
     //
     // Response: 32-byte Ed25519 public key
     //
+    // Note: if a non-default path is requested, the default signing key is
+    // restored afterward so that INS_SIGN_TX continues to use m/44'/501'/0'.
+    //
     private void getPublicKey(APDU apdu) {
         if (!pin.isValidated()) ISOException.throwIt(SW_UNAUTHORIZED);
         if (!isSeeded)          ISOException.throwIt(SW_SEED_NOT_IMPORTED);
@@ -519,10 +540,25 @@ public class TapiocaApplet extends Applet {
 
         if (depth < 0 || depth > (byte) 10) ISOException.throwIt(SW_INVALID_PARAMETER);
 
+        boolean requestingDefault = isDefaultPath(depth, buf, off);
         deriveAndLoadKey(depth, buf, off);
 
+        // buf[0..32] = requested public key (written before we touch anything else)
         signer.getPublicKey(buf, (short) 0);
+
+        // Restore the default signing key so signTransaction() remains correct.
+        // Skipped when the requested path already is the default (avoids double work).
+        if (!requestingDefault) {
+            deriveAndLoadKey((byte) 3, DEFAULT_PATH, (short) 0);
+        }
+
         apdu.setOutgoingAndSend((short) 0, (short) 32);
+    }
+
+    // Returns true iff depth == 3 and the next 12 bytes of pathBuf equal DEFAULT_PATH.
+    private boolean isDefaultPath(byte depth, byte[] pathBuf, short pathOff) {
+        if (depth != (byte) 3) return false;
+        return Util.arrayCompare(pathBuf, pathOff, DEFAULT_PATH, (short) 0, (short) 12) == 0;
     }
 
     // ── Key derivation helper ─────────────────────────────────────────────────
@@ -570,18 +606,17 @@ public class TapiocaApplet extends Applet {
     // ── INS_SIGN_TX (0x6F) ───────────────────────────────────────────────────
     //
     // Requires PIN validated and seed imported.
-    // Streams a Solana transaction message across one or more APDUs, derives the
-    // signing key for the requested path, and returns a 64-byte Ed25519 signature
-    // followed by the 32-byte public key (eliminating a separate GET_PUBLIC_KEY call).
+    // Streams a Solana transaction message across one or more APDUs and returns a
+    // 64-byte Ed25519 signature followed by the 32-byte public key.
+    // Always signs at m/44'/501'/0' — the key loaded by INS_IMPORT_SEED.
     //
     // P1 flags (may be OR-combined):
-    //   0x01 = first chunk  — data starts with [depth (1)][path (depth×4)] then message bytes
+    //   0x01 = first chunk  — resets the message accumulator; data is message bytes
     //   0x80 = last chunk   — response contains 64-byte signature + 32-byte public key
     //   0x00 = continuation — data is message bytes only; no response data
     //   0x81 = first AND last (single-chunk message)
     //
-    // First chunk data: [depth (1)] [idx_0 (4)] ... [idx_n (4)] [message bytes ...]
-    // Other chunk data: [message bytes ...]
+    // All chunk data: [message bytes ...]
     // Response (last chunk only): [signature (64 bytes)] [public key (32 bytes)]
     //
     private void signTransaction(APDU apdu) {
@@ -597,21 +632,8 @@ public class TapiocaApplet extends Applet {
         boolean isLast  = (p1 & (byte) 0x80) != 0;
 
         if (isFirst) {
-            // Parse depth and derive signing key
-            if (len < (short) 1) ISOException.throwIt(SW_INVALID_PARAMETER);
-            byte depth = buf[off++];
-            len--;
-
-            if (depth < 0 || depth > (byte) 10) ISOException.throwIt(SW_INVALID_PARAMETER);
-
-            short pathLen = (short)(depth * 4);
-            if (len < pathLen) ISOException.throwIt(SW_INVALID_PARAMETER);
-
-            deriveAndLoadKey(depth, buf, off);
-            off += pathLen;
-            len -= pathLen;
-
-            // Reset accumulator for fresh message
+            // Reset accumulator for fresh message.
+            // No path derivation — always uses the key loaded by importSeed().
             txState.init();
             txSignActive[0] = (byte) 0x01;
         } else {
