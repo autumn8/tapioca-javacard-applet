@@ -571,17 +571,18 @@ public class TapiocaApplet extends Applet {
     //
     // Requires PIN validated and seed imported.
     // Streams a Solana transaction message across one or more APDUs, derives the
-    // signing key for the requested path, and returns a 64-byte Ed25519 signature.
+    // signing key for the requested path, and returns a 64-byte Ed25519 signature
+    // followed by the 32-byte public key (eliminating a separate GET_PUBLIC_KEY call).
     //
     // P1 flags (may be OR-combined):
     //   0x01 = first chunk  — data starts with [depth (1)][path (depth×4)] then message bytes
-    //   0x80 = last chunk   — response contains 64-byte signature
+    //   0x80 = last chunk   — response contains 64-byte signature + 32-byte public key
     //   0x00 = continuation — data is message bytes only; no response data
     //   0x81 = first AND last (single-chunk message)
     //
     // First chunk data: [depth (1)] [idx_0 (4)] ... [idx_n (4)] [message bytes ...]
     // Other chunk data: [message bytes ...]
-    // Response (last chunk only): [signature (64 bytes)]
+    // Response (last chunk only): [signature (64 bytes)] [public key (32 bytes)]
     //
     private void signTransaction(APDU apdu) {
         if (!pin.isValidated()) ISOException.throwIt(SW_UNAUTHORIZED);
@@ -624,12 +625,13 @@ public class TapiocaApplet extends Applet {
         }
 
         if (isLast) {
-            // Sign the complete buffered message and return signature
+            // Sign the complete buffered message; append public key after signature
             signer.sign(txState.getBuffer(), (short) 0, txState.getMessageLength(),
                         buf, (short) 0);
+            signer.getPublicKey(buf, (short) 64);
             txState.reset();
             txSignActive[0] = (byte) 0x00;
-            apdu.setOutgoingAndSend((short) 0, (short) 64);
+            apdu.setOutgoingAndSend((short) 0, (short) 96);
         }
         // Non-last chunks: fall through with SW 9000 and no response data
     }
